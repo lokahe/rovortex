@@ -1,0 +1,18 @@
+[package]
+name = "rovortex-users"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+argon2.workspace = true
+rand_core.workspace = true
+# 纯业务层仅取最小特性集（RwLock），不引入运行时/宏
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+tokio.workspace = true

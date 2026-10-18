@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = ["crates/users", "crates/gateway_api"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# ---- 内部 crate（组合根使用）----
+rovortex-users = { path = "crates/users" }
+
+# ---- Web 框架与运行时 ----
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+
+# ---- 序列化 ----
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ---- 通用 ----
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+async-trait = "0.1"
+
+# ---- 安全 ----
+argon2 = "0.5"
+# getrandom feature：提供 SaltString::generate 所需的 OsRng
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# ---- 可观测性 ----
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"
