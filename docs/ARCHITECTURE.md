@@ -73,8 +73,49 @@ UserError（users，thiserror）
 | Phase 4 | 邮箱验证、密码重置、审计日志 | lettre |
 | Phase 5 | RBAC、OAuth2 第三方登录、新业务模块 | — |
 
-## 6. 待决策项
+## 6. 决策记录
 
-- [ ] 数据库选型确认（推荐 PostgreSQL + sqlx，详见 docs/DATABASE.md）
-- [ ] 会话策略：JWT（无状态）vs 服务端会话（可撤销）—— Phase 2 前定
-- [ ] 观测后端：OTLP → Prometheus/Grafana 或 Jaeger
+已确认：
+- 数据库：PostgreSQL 16+（见 docs/DATABASE.md）
+- 访问层：sqlx
+- 迁移：sqlx migrate
+- 本地开发：docker-compose PG 容器
+
+未决策：
+- 会话策略：JWT（无状态）vs 服务端会话（可撤销）—— Phase 2 前定
+- 观测后端：OTLP → Prometheus/Grafana 或 Jaeger
+
+## 7. 架构分层决策与模块边界
+
+### 7.1 当前分层（Phase 1，已落地）
+
+```
+gateway_api (表达层)
+    │
+    ▼
+users (业务层)
+    │  (注入)
+    ▼
+storage_pg / storage_in_memory (持久化实现)
+```
+
+### 7.2 依赖规则（编译器强制）
+
+- `gateway_api` 可依赖 `users`、`storage_pg`；
+- `users` 禁止依赖 `gateway_api`、`axum`、`serde`、数据库驱动；
+- 基础设施层（storage_*）只实现 `UserRepository`，不反向依赖业务层；
+
+### 7.3 基础公共模块（`common`）决策
+
+结论：**暂不拆**。
+
+原因：Phase 1 仅一个业务模块（users），`common` 层为空壳。
+
+拆分触发条件：
+1. 业务模块 ≥2 个（如 users、auth、billing）；
+2. 多个模块开始重复定义错误、配置、追踪、日志。
+
+拆分方式：
+- 新增 `rovortex-common` crate，放置错误定义、配置、Tracing 初始化、通用工具；
+- 业务模块依赖 `rovortex-common`；
+- 不允许业务层依赖 `rovortex-common` 的业务逻辑；

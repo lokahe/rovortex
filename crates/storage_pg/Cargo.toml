@@ -1,0 +1,23 @@
+[package]
+name = "storage_pg"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rovortex-users = { path = "../users" }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "postgres",
+    "tls-rustls",
+    "uuid",
+    "chrono",
+] }
+
+thiserror = "2"
+async-trait = "0.1"
+
+[lib]
+name = "storage_pg"
+path = "src/lib.rs"
