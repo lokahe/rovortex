@@ -71,10 +71,73 @@ impl UserService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::in_memory::InMemoryUserRepository;
+    use crate::repository::UserRepository;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    struct TestRepository {
+        store: std::collections::HashMap<Uuid, User>,
+        username_index: std::collections::HashMap<String, Uuid>,
+        email_index: std::collections::HashMap<String, Uuid>,
+    }
+
+    impl TestRepository {
+        fn new() -> Self {
+            TestRepository {
+                store: std::collections::HashMap::new(),
+                username_index: std::collections::HashMap::new(),
+                email_index: std::collections::HashMap::new(),
+            }
+        }
+    }
+
+    impl UserRepository for TestRepository {
+        async fn create(&self, new_user: NewUser) -> Result<User, UserError> {
+            let username_key = new_user.username.to_lowercase();
+            let email_key = new_user.email.to_lowercase();
+
+            if self.username_index.contains_key(&username_key) {
+                return Err(UserError::UsernameTaken(new_user.username));
+            }
+            if self.email_index.contains_key(&email_key) {
+                return Err(UserError::EmailTaken(new_user.email));
+            }
+
+            let user = User {
+                id: Uuid::now_v7(),
+                username: new_user.username,
+                email: new_user.email,
+                password_hash: new_user.password_hash,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+
+            self.username_index.insert(username_key, user.id);
+            self.email_index.insert(email_key, user.id);
+            self.store.insert(user.id, user.clone());
+
+            Ok(user)
+        }
+
+        async fn find_by_username(&self, username: &str) -> Result<Option<User>, UserError> {
+            let id = self.username_index.get(&username.to_lowercase()).cloned();
+            Ok(id.and_then(|id| self.store.get(&id).cloned()))
+        }
+
+        async fn find_by_email(&self, email: &str) -> Result<Option<User>, UserError> {
+            let id = self.email_index.get(&email.to_lowercase()).cloned();
+            Ok(id.and_then(|id| self.store.get(&id).cloned()))
+        }
+
+        async fn find_by_login(&self, login: &str) -> Result<Option<User>, UserError> {
+            let key = login.to_lowercase();
+            let id = self.username_index.get(&key).or_else(|| self.email_index.get(&key)).cloned();
+            Ok(id.and_then(|id| self.store.get(&id).cloned()))
+        }
+    }
 
     fn service() -> UserService {
-        UserService::new(Arc::new(InMemoryUserRepository::new()))
+        UserService::new(Arc::new(TestRepository::new()))
     }
 
     #[tokio::test]

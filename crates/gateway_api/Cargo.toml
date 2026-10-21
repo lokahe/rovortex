@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 rovortex-users.workspace = true
+storage_pg = { path = "../storage_pg" }
 
 axum.workspace = true
 tokio.workspace = true

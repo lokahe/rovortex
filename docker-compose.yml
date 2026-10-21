@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  pg:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rovortex
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: rovortex
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  rovortex:
+    build:
+      context: .
+      dockerfile: crates/gateway_api/Dockerfile
+    environment:
+      ROVORTEX_DB_URL: postgres://rovortex:***@pg:5432/rovortex
+    ports:
+      - "8080:8080"
+    depends_on:
+      - pg
+    restart: unless-stopped
+
+volumes:
+  pgdata:

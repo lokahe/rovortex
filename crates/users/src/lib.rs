@@ -11,12 +11,10 @@
 //! 依赖方向：`gateway_api → users`，本 crate 永远不反向依赖表现层。
 
 pub mod domain;
-pub mod in_memory;
 pub mod password;
 pub mod repository;
 pub mod service;
 
 pub use domain::{NewUser, User, UserError};
-pub use in_memory::InMemoryUserRepository;
 pub use repository::UserRepository;
 pub use service::UserService;

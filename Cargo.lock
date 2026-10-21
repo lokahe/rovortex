@@ -1186,6 +1186,7 @@ dependencies = [
  "rovortex-users",
  "serde",
  "serde_json",
+ "storage_pg",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1653,10 +1654,12 @@ name = "storage_pg"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "rovortex-users",
  "sqlx",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
