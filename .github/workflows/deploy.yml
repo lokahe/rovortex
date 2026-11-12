@@ -1,0 +1,51 @@
+name: deploy
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  test-build-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Set image tag
+        id: tag
+        run: echo "sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/gateway_api/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/rovortex-api:latest
+            ghcr.io/${{ github.repository_owner }}/rovortex-api:${{ steps.tag.outputs.sha }}
+
+      - name: Deploy to cloud-01
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            docker pull ghcr.io/${{ github.repository_owner }}/rovortex-api:${{ steps.tag.outputs.sha }}
+            docker tag ghcr.io/${{ github.repository_owner }}/rovortex-api:${{ steps.tag.outputs.sha }} rovortex-rovortex:latest
+            cd /srv/rovortex && docker compose up -d --no-build
+            docker image prune -f
