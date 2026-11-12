@@ -196,6 +196,16 @@ docker image prune -a              # 清理无用镜像（磁盘紧张时）
 
 ## 一次性设置
 
+### 0. GHCR 包可见性（重要坑）
+
+仓库转 public **不会**自动把已存在的 GHCR 包转 public（包默认继承创建时的仓库状态）。
+private 包服务器匿名 pull 会 401。处理：
+- **public 仓库**：包页面 → Package settings → Danger Zone → Change visibility → Public，
+  服务器匿名拉取，workflow 无需额外令牌（推镜像用自带 GITHUB_TOKEN）。
+- **private 仓库**：需给服务器发 read:packages PAT 加 secret，且每月仅 1GB 免费拉取流量。
+
+包页：https://github.com/<user>/packages/container/package/<包名>
+
 ### 1. 服务器生成部署密钥对（用于 GitHub 回连）
 
 ```bash
