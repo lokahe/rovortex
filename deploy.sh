@@ -14,8 +14,8 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-echo "==> 2. 构建并启动容器"
-docker compose up -d --build
+echo "==> 2. 用已导入的镜像启动（服务器上不构建）"
+docker compose up -d --no-build
 
 echo "==> 3. 查看状态"
 docker compose ps
