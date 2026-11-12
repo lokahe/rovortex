@@ -1,18 +1,18 @@
 # ---- 构建阶段 ----
-FROM rust:1.99-slim AS builder
+FROM rust:1-slim AS builder
 
 WORKDIR /app
 
-# 复制 Cargo 清单，复用 cargo 缓存（加快后续构建）
+# 先复制清单以复用依赖缓存层
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
+COPY migrations migrations
 
-# 必须先生成 sqlx-data.json 再 build（见下方说明）
-# 若已有 sqlx-data.json，取消下面注释：
-# COPY sqlx-data.json ./
+# .sqlx 离线缓存由 cargo sqlx prepare 在本地生成并随上下文复制
+COPY .sqlx ./.sqlx
+ENV SQLX_OFFLINE=true
 
-# 编译：--release + --locked，保证可复现
-RUN cargo build --release --locked
+RUN cargo build --release --locked --package rovortex-gateway-api
 
 # ---- 运行阶段 ----
 FROM debian:bookworm-slim AS runtime
@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 
 WORKDIR /app
 
+# 迁移脚本随镜像携带，启动时由 sqlx::migrate! 内嵌执行（实际是编译期嵌入）
 COPY --from=builder /app/target/release/rovortex-gateway-api /usr/local/bin/
 
 EXPOSE 8080

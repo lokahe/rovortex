@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   pg:
     image: postgres:16-alpine
@@ -7,10 +5,13 @@ services:
       POSTGRES_USER: rovortex
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: rovortex
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rovortex -d rovortex"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   rovortex:
@@ -18,11 +19,13 @@ services:
       context: .
       dockerfile: crates/gateway_api/Dockerfile
     environment:
-      ROVORTEX_DB_URL: postgres://rovortex:***@pg:5432/rovortex
+      ROVORTEX_DB_URL: postgres://rovortex:${DB_PASSWORD}@pg:5432/rovortex
+      RUST_LOG: info
     ports:
       - "8080:8080"
     depends_on:
-      - pg
+      pg:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

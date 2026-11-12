@@ -1,5 +1,12 @@
 target/
-Cargo.lock
+.git/
 *.log
 .env
-sqlx-data.json
+deploy.ps1
+deploy.sh
+check_*.ps1
+test_parse.ps1
+*.crate
+.idea/
+docs/
+SKILL.md

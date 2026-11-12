@@ -22,8 +22,8 @@ async fn main() {
         )
         .init();
 
-    // 组合根：在这里注入具体仓储实现（当前为内存实现，数据库落地后仅改此处）。
-    let state = AppState::new();
+    // 组合根：在这里注入具体仓储实现（当前为 PostgreSQL，含启动时迁移）。
+    let state = AppState::new().await;
     let app = routes::router(state);
 
     let port: u16 = std::env::var("ROVORTEX_PORT")

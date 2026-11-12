@@ -8,12 +8,31 @@ use uuid::Uuid;
 
 use rovortex_users::{NewUser, User, UserError, UserRepository};
 
+/// 将 sqlx 错误映射为领域错误：唯一约束冲突对应 UsernameTaken / EmailTaken。
+fn map_sqlx_err(e: sqlx::Error, kind: fn(String) -> UserError) -> UserError {
+    if let sqlx::Error::Database(db_err) = &e {
+        match db_err.constraint().unwrap_or_default() {
+            "users_username_uniq" | "users_username_key" => {
+                return UserError::UsernameTaken("unknown".into());
+            }
+            "users_email_uniq" | "users_email_key" => {
+                return UserError::EmailTaken("unknown".into());
+            }
+            _ => {}
+        }
+    }
+    kind(e.to_string())
+}
+
 mod row {
     use chrono::{DateTime, Utc};
     use sqlx::FromRow;
     use uuid::Uuid;
 
+    /// 与 users 表列一一对应；`username_key`/`email_key`/`status`
+    /// 由 DB 生成或预留，暂不在领域层使用。
     #[derive(FromRow)]
+    #[allow(dead_code)]
     pub struct UserRow {
         pub id: Uuid,
         pub username: String,
@@ -32,7 +51,7 @@ pub struct PgUserRepository {
 }
 
 impl PgUserRepository {
-    pub async fn new(connection_string: &str) -> Result<Self, sqlx::Error> {
+    pub async fn connect(connection_string: &str) -> Result<Self, sqlx::Error> {
         let pool = PgPool::connect(connection_string).await?;
         Ok(Self { pool })
     }
@@ -52,7 +71,8 @@ impl UserRepository for PgUserRepository {
             new_user.password_hash,
         )
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
 
         Ok(User {
             id: row.id,
@@ -72,7 +92,8 @@ impl UserRepository for PgUserRepository {
             username.to_lowercase(),
         )
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
 
         Ok(row.map(|r| User {
             id: r.id,
@@ -92,7 +113,8 @@ impl UserRepository for PgUserRepository {
             email.to_lowercase(),
         )
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
 
         Ok(row.map(|r| User {
             id: r.id,
@@ -112,7 +134,8 @@ impl UserRepository for PgUserRepository {
             login.to_lowercase(),
         )
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
 
         Ok(row.map(|r| User {
             id: r.id,

@@ -75,31 +75,33 @@ mod tests {
     use chrono::Utc;
     use uuid::Uuid;
 
+    /// 测试用内存仓储：与生产实现一样满足 `Send + Sync` 且不可变自洽。
     struct TestRepository {
-        store: std::collections::HashMap<Uuid, User>,
-        username_index: std::collections::HashMap<String, Uuid>,
-        email_index: std::collections::HashMap<String, Uuid>,
+        store: std::sync::Mutex<std::collections::HashMap<Uuid, User>>,
+        username_index: std::sync::Mutex<std::collections::HashMap<String, Uuid>>,
+        email_index: std::sync::Mutex<std::collections::HashMap<String, Uuid>>,
     }
 
     impl TestRepository {
         fn new() -> Self {
             TestRepository {
-                store: std::collections::HashMap::new(),
-                username_index: std::collections::HashMap::new(),
-                email_index: std::collections::HashMap::new(),
+                store: std::sync::Mutex::new(std::collections::HashMap::new()),
+                username_index: std::sync::Mutex::new(std::collections::HashMap::new()),
+                email_index: std::sync::Mutex::new(std::collections::HashMap::new()),
             }
         }
     }
 
+    #[async_trait::async_trait]
     impl UserRepository for TestRepository {
         async fn create(&self, new_user: NewUser) -> Result<User, UserError> {
             let username_key = new_user.username.to_lowercase();
             let email_key = new_user.email.to_lowercase();
 
-            if self.username_index.contains_key(&username_key) {
+            if self.username_index.lock().unwrap().contains_key(&username_key) {
                 return Err(UserError::UsernameTaken(new_user.username));
             }
-            if self.email_index.contains_key(&email_key) {
+            if self.email_index.lock().unwrap().contains_key(&email_key) {
                 return Err(UserError::EmailTaken(new_user.email));
             }
 
@@ -112,27 +114,36 @@ mod tests {
                 updated_at: Utc::now(),
             };
 
-            self.username_index.insert(username_key, user.id);
-            self.email_index.insert(email_key, user.id);
-            self.store.insert(user.id, user.clone());
+            self.username_index
+                .lock()
+                .unwrap()
+                .insert(username_key, user.id);
+            self.email_index.lock().unwrap().insert(email_key, user.id);
+            self.store.lock().unwrap().insert(user.id, user.clone());
 
             Ok(user)
         }
 
         async fn find_by_username(&self, username: &str) -> Result<Option<User>, UserError> {
-            let id = self.username_index.get(&username.to_lowercase()).cloned();
-            Ok(id.and_then(|id| self.store.get(&id).cloned()))
+            let idx = self.username_index.lock().unwrap();
+            let store = self.store.lock().unwrap();
+            let id = idx.get(&username.to_lowercase()).cloned();
+            Ok(id.and_then(|id| store.get(&id).cloned()))
         }
 
         async fn find_by_email(&self, email: &str) -> Result<Option<User>, UserError> {
-            let id = self.email_index.get(&email.to_lowercase()).cloned();
-            Ok(id.and_then(|id| self.store.get(&id).cloned()))
+            let idx = self.email_index.lock().unwrap();
+            let store = self.store.lock().unwrap();
+            let id = idx.get(&email.to_lowercase()).cloned();
+            Ok(id.and_then(|id| store.get(&id).cloned()))
         }
 
         async fn find_by_login(&self, login: &str) -> Result<Option<User>, UserError> {
             let key = login.to_lowercase();
-            let id = self.username_index.get(&key).or_else(|| self.email_index.get(&key)).cloned();
-            Ok(id.and_then(|id| self.store.get(&id).cloned()))
+            let username_id = self.username_index.lock().unwrap().get(&key).cloned();
+            let id = username_id.or_else(|| self.email_index.lock().unwrap().get(&key).cloned());
+            let store = self.store.lock().unwrap();
+            Ok(id.and_then(|id| store.get(&id).cloned()))
         }
     }
 
