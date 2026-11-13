@@ -51,9 +51,9 @@ pub struct PgUserRepository {
 }
 
 impl PgUserRepository {
-    pub async fn connect(connection_string: &str) -> Result<Self, sqlx::Error> {
-        let pool = PgPool::connect(connection_string).await?;
-        Ok(Self { pool })
+    /// 由调用方（组合根）提供连接池：迁移与业务查询共用同一个池。
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
     }
 }
 
