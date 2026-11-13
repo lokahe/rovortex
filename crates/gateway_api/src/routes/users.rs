@@ -47,8 +47,8 @@ impl From<User> for UserResponse {
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
     pub user: UserResponse,
-    /// TODO(phase-2)：签发 JWT 访问令牌后填充。
-    pub token: Option<String>,
+    /// JWT access token（HS256，2 小时有效期）。
+    pub token: String,
 }
 
 /// POST /api/users/register —— 201 Created
@@ -60,11 +60,12 @@ pub async fn register(
         .users
         .register(&req.username, &req.email, &req.password)
         .await?;
+    let token = state.tokens.sign(user.id)?;
     Ok((
         StatusCode::CREATED,
         Json(AuthResponse {
             user: user.into(),
-            token: None,
+            token,
         }),
     ))
 }
@@ -75,8 +76,9 @@ pub async fn login(
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     let user = state.users.login(&req.login, &req.password).await?;
+    let token = state.tokens.sign(user.id)?;
     Ok(Json(AuthResponse {
         user: user.into(),
-        token: None,
+        token,
     }))
 }

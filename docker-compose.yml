@@ -20,6 +20,7 @@ services:
       dockerfile: crates/gateway_api/Dockerfile
     environment:
       ROVORTEX_DB_URL: postgres://rovortex:${DB_PASSWORD}@pg:5432/rovortex
+      ROVORTEX_JWT_SECRET: ${ROVORTEX_JWT_SECRET}
       RUST_LOG: info
     ports:
       - "8080:8080"

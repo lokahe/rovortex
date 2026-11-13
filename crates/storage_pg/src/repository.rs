@@ -146,4 +146,25 @@ impl UserRepository for PgUserRepository {
             updated_at: r.updated_at,
         }))
     }
+
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, UserError> {
+        let row = sqlx::query_as!(
+            row::UserRow,
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, created_at, updated_at
+               FROM users WHERE id = $1"#,
+            id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
+
+        Ok(row.map(|r| User {
+            id: r.id,
+            username: r.username,
+            email: r.email,
+            password_hash: r.password_hash,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }))
+    }
 }

@@ -2,13 +2,14 @@
 
 use std::sync::Arc;
 
-use rovortex_users::UserService;
+use rovortex_users::{TokenSigner, UserService};
 use storage_pg::PgUserRepository;
 
 /// 通过 `State<AppState>` 提取器在各 handler 间共享。
 #[derive(Clone)]
 pub struct AppState {
     pub users: Arc<UserService>,
+    pub tokens: Arc<TokenSigner>,
 }
 
 impl AppState {
@@ -16,6 +17,7 @@ impl AppState {
     ///
     /// 环境变量：
     /// - `ROVORTEX_DB_URL`：Postgres DSN，默认 `postgres://localhost:5432/rovortex`
+    /// - `ROVORTEX_JWT_SECRET`：HS256 签名密钥，生产环境必须设置
     pub async fn new() -> Self {
         let dsn = std::env::var("ROVORTEX_DB_URL").unwrap_or_else(|_| {
             "postgres://localhost:5432/rovortex".to_string()
@@ -39,8 +41,12 @@ impl AppState {
                 .expect("failed to connect to PostgreSQL"),
         );
 
+        let jwt_secret = std::env::var("ROVORTEX_JWT_SECRET")
+            .expect("ROVORTEX_JWT_SECRET must be set");
+
         Self {
             users: Arc::new(UserService::new(repo)),
+            tokens: Arc::new(TokenSigner::new(&jwt_secret)),
         }
     }
 }

@@ -11,6 +11,8 @@ thiserror.workspace = true
 async-trait.workspace = true
 argon2.workspace = true
 rand_core.workspace = true
+jsonwebtoken.workspace = true
+serde.workspace = true
 # 纯业务层仅取最小特性集（RwLock），不引入运行时/宏
 tokio = { version = "1", default-features = false, features = ["sync"] }
 

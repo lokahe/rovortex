@@ -19,6 +19,11 @@ impl UserService {
         Self { repo }
     }
 
+    /// 暴露仓储给表现层做按 id 的资料读取（受鉴权保护）。
+    pub fn repository(&self) -> Arc<dyn UserRepository> {
+        Arc::clone(&self.repo)
+    }
+
     /// 注册：校验 → 查重 → Argon2id 哈希 → 持久化。
     pub async fn register(
         &self,
@@ -144,6 +149,10 @@ mod tests {
             let id = username_id.or_else(|| self.email_index.lock().unwrap().get(&key).cloned());
             let store = self.store.lock().unwrap();
             Ok(id.and_then(|id| store.get(&id).cloned()))
+        }
+
+        async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, UserError> {
+            Ok(self.store.lock().unwrap().get(&id).cloned())
         }
     }
 

@@ -33,6 +33,7 @@ async-trait = "0.1"
 argon2 = "0.5"
 # getrandom feature：提供 SaltString::generate 所需的 OsRng
 rand_core = { version = "0.6", features = ["getrandom"] }
+jsonwebtoken = "9"
 
 # ---- 可观测性 ----
 tracing = "0.1"

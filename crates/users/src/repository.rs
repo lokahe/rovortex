@@ -30,4 +30,7 @@ pub trait UserRepository: Send + Sync {
 
     /// 按登录名（用户名 **或** 邮箱）查找，登录场景专用。
     async fn find_by_login(&self, login: &str) -> Result<Option<User>, UserError>;
+
+    /// 按唯一 id 查找（鉴权后的资料读取等场景）。
+    async fn find_by_id(&self, id: uuid::Uuid) -> Result<Option<User>, UserError>;
 }
