@@ -33,4 +33,11 @@ pub trait UserRepository: Send + Sync {
 
     /// 按唯一 id 查找（鉴权后的资料读取等场景）。
     async fn find_by_id(&self, id: uuid::Uuid) -> Result<Option<User>, UserError>;
+
+    /// 更新密码哈希（改密码）。调用方保证已完成旧密码校验。
+    async fn update_password_hash(
+        &self,
+        id: uuid::Uuid,
+        new_hash: &str,
+    ) -> Result<(), UserError>;
 }

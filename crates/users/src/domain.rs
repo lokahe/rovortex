@@ -50,6 +50,9 @@ pub enum UserError {
     #[error("invalid credentials")]
     InvalidCredentials,
 
+    #[error("refresh token is invalid or expired")]
+    InvalidRefreshToken,
+
     #[error("password hashing error: {0}")]
     Hashing(String),
 }

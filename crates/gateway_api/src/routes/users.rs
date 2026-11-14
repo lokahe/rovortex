@@ -49,6 +49,9 @@ pub struct AuthResponse {
     pub user: UserResponse,
     /// JWT access token（HS256，2 小时有效期）。
     pub token: String,
+    /// 明文 refresh token：客户端妥善保存，用于换取新 access token。
+    pub refresh_token: String,
+    pub refresh_expires_at: DateTime<Utc>,
 }
 
 /// POST /api/users/register —— 201 Created
@@ -56,16 +59,18 @@ pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<AuthResponse>), ApiError> {
-    let user = state
+    let session = state
         .users
         .register(&req.username, &req.email, &req.password)
         .await?;
-    let token = state.tokens.sign(user.id)?;
+    let token = state.tokens.sign(session.user.id)?;
     Ok((
         StatusCode::CREATED,
         Json(AuthResponse {
-            user: user.into(),
+            user: session.user.into(),
             token,
+            refresh_token: session.refresh_token,
+            refresh_expires_at: session.refresh_expires_at,
         }),
     ))
 }
@@ -75,10 +80,12 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    let user = state.users.login(&req.login, &req.password).await?;
-    let token = state.tokens.sign(user.id)?;
+    let session = state.users.login(&req.login, &req.password).await?;
+    let token = state.tokens.sign(session.user.id)?;
     Ok(Json(AuthResponse {
-        user: user.into(),
+        user: session.user.into(),
         token,
+        refresh_token: session.refresh_token,
+        refresh_expires_at: session.refresh_expires_at,
     }))
 }

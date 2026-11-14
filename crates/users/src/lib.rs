@@ -13,10 +13,12 @@
 pub mod auth;
 pub mod domain;
 pub mod password;
+pub mod refresh_token;
 pub mod repository;
 pub mod service;
 
 pub use auth::TokenSigner;
 pub use domain::{NewUser, User, UserError};
+pub use refresh_token::{NewRefreshToken, RefreshTokenRepository};
 pub use repository::UserRepository;
 pub use service::UserService;

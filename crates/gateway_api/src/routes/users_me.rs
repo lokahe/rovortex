@@ -2,9 +2,8 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
-use rovortex_users::UserRepository;
+use rovortex_users::UserError;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -22,8 +21,9 @@ pub struct MeResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UpdateProfileRequest {
-    pub email: String,
+pub struct ChangePasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
 }
 
 /// GET /api/users/me —— 200 OK
@@ -36,7 +36,7 @@ pub async fn me(
         .repository()
         .find_by_id(auth.user_id)
         .await?
-        .ok_or(rovortex_users::UserError::UserNotFound)?;
+        .ok_or(UserError::UserNotFound)?;
     Ok(Json(MeResponse {
         id: user.id,
         username: user.username,
@@ -44,4 +44,17 @@ pub async fn me(
         created_at: user.created_at,
         updated_at: user.updated_at,
     }))
+}
+
+/// PUT /api/users/me/password —— 204 No Content（成功后全部会话失效）
+pub async fn change_password(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    state
+        .users
+        .change_password(auth.user_id, &req.old_password, &req.new_password)
+        .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }

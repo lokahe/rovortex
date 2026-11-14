@@ -25,7 +25,9 @@ impl IntoResponse for ApiError {
             | UserError::InvalidEmail(_)
             | UserError::InvalidPassword(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
             UserError::UserNotFound => (StatusCode::NOT_FOUND, "user_not_found"),
-            UserError::InvalidCredentials => (StatusCode::UNAUTHORIZED, "invalid_credentials"),
+            UserError::InvalidCredentials | UserError::InvalidRefreshToken => {
+                (StatusCode::UNAUTHORIZED, "invalid_credentials")
+            }
             UserError::Hashing(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
 

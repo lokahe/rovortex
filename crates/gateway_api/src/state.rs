@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use rovortex_users::{TokenSigner, UserService};
 use sqlx::PgPool;
-use storage_pg::PgUserRepository;
+use storage_pg::{PgRefreshTokenRepository, PgUserRepository};
 
 /// 运行配置：全部来自环境变量。
 struct Config {
@@ -39,9 +39,10 @@ impl AppState {
         let config = Config::from_env();
         let pool = prepare_pool(&config.dsn).await;
 
-        let repo = Arc::new(PgUserRepository::from_pool(pool));
+        let repo = Arc::new(PgUserRepository::from_pool(pool.clone()));
+        let refresh_repo = Arc::new(PgRefreshTokenRepository::from_pool(pool));
         Self {
-            users: Arc::new(UserService::new(repo)),
+            users: Arc::new(UserService::new(repo, refresh_repo)),
             tokens: Arc::new(TokenSigner::new(&config.jwt_secret)),
         }
     }

@@ -167,4 +167,16 @@ impl UserRepository for PgUserRepository {
             updated_at: r.updated_at,
         }))
     }
+
+    async fn update_password_hash(&self, id: Uuid, new_hash: &str) -> Result<(), UserError> {
+        sqlx::query!(
+            r#"UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1"#,
+            id,
+            new_hash,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
+        Ok(())
+    }
 }

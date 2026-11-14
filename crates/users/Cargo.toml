@@ -10,9 +10,12 @@ chrono.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 argon2.workspace = true
-rand_core.workspace = true
 jsonwebtoken.workspace = true
 serde.workspace = true
+base64.workspace = true
+sha2.workspace = true
+# OsRng::fill_bytes 需要 getrandom feature（refresh token 生成）
+rand_core = { version = "0.6", features = ["getrandom"] }
 # 纯业务层仅取最小特性集（RwLock），不引入运行时/宏
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
