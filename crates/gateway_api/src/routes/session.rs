@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use rovortex_users::User;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::error::ApiError;
 use crate::routes::users::AuthResponse;

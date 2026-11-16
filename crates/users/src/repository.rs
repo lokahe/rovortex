@@ -40,4 +40,11 @@ pub trait UserRepository: Send + Sync {
         id: uuid::Uuid,
         new_hash: &str,
     ) -> Result<(), UserError>;
+
+    /// 标记邮箱已验证（注册验证信确认后）。
+    async fn mark_email_verified(&self, id: uuid::Uuid) -> Result<(), UserError>;
+
+    /// 更新邮箱（改邮箱确认后调用）。实现必须同时置 email_verified = true
+    /// 并更新 updated_at；邮箱冲突由数据库唯一索引兜底。
+    async fn update_email(&self, id: uuid::Uuid, new_email: &str) -> Result<(), UserError>;
 }

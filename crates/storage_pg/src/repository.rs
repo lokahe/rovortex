@@ -36,11 +36,15 @@ mod row {
     pub struct UserRow {
         pub id: Uuid,
         pub username: String,
+        #[allow(dead_code)]
         pub username_key: String,
         pub email: String,
+        #[allow(dead_code)]
         pub email_key: String,
         pub password_hash: String,
+        #[allow(dead_code)]
         pub status: i16,
+        pub email_verified: bool,
         pub created_at: DateTime<Utc>,
         pub updated_at: DateTime<Utc>,
     }
@@ -51,9 +55,20 @@ pub struct PgUserRepository {
 }
 
 impl PgUserRepository {
-    /// 由调用方（组合根）提供连接池：迁移与业务查询共用同一个池。
     pub fn from_pool(pool: PgPool) -> Self {
         Self { pool }
+    }
+}
+
+fn into_user(r: row::UserRow) -> User {
+    User {
+        id: r.id,
+        username: r.username,
+        email: r.email,
+        password_hash: r.password_hash,
+        email_verified: r.email_verified,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
     }
 }
 
@@ -64,7 +79,7 @@ impl UserRepository for PgUserRepository {
             row::UserRow,
             r#"INSERT INTO users (id, username, email, password_hash)
                VALUES ($1, $2, $3, $4)
-               RETURNING id, username, username_key, email, email_key, password_hash, status, created_at, updated_at"#,
+               RETURNING id, username, username_key, email, email_key, password_hash, status, email_verified, created_at, updated_at"#,
             Uuid::now_v7(),
             new_user.username,
             new_user.email,
@@ -74,20 +89,13 @@ impl UserRepository for PgUserRepository {
         .await
         .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
 
-        Ok(User {
-            id: row.id,
-            username: row.username,
-            email: row.email,
-            password_hash: row.password_hash,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        })
+        Ok(into_user(row))
     }
 
     async fn find_by_username(&self, username: &str) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, created_at, updated_at
                FROM users WHERE username_key = $1"#,
             username.to_lowercase(),
         )
@@ -95,20 +103,13 @@ impl UserRepository for PgUserRepository {
         .await
         .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
 
-        Ok(row.map(|r| User {
-            id: r.id,
-            username: r.username,
-            email: r.email,
-            password_hash: r.password_hash,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-        }))
+        Ok(row.map(into_user))
     }
 
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, created_at, updated_at
                FROM users WHERE email_key = $1"#,
             email.to_lowercase(),
         )
@@ -116,20 +117,13 @@ impl UserRepository for PgUserRepository {
         .await
         .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
 
-        Ok(row.map(|r| User {
-            id: r.id,
-            username: r.username,
-            email: r.email,
-            password_hash: r.password_hash,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-        }))
+        Ok(row.map(into_user))
     }
 
     async fn find_by_login(&self, login: &str) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, created_at, updated_at
                FROM users WHERE username_key = $1 OR email_key = $1"#,
             login.to_lowercase(),
         )
@@ -137,20 +131,13 @@ impl UserRepository for PgUserRepository {
         .await
         .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
 
-        Ok(row.map(|r| User {
-            id: r.id,
-            username: r.username,
-            email: r.email,
-            password_hash: r.password_hash,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-        }))
+        Ok(row.map(into_user))
     }
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, created_at, updated_at
                FROM users WHERE id = $1"#,
             id,
         )
@@ -158,14 +145,7 @@ impl UserRepository for PgUserRepository {
         .await
         .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
 
-        Ok(row.map(|r| User {
-            id: r.id,
-            username: r.username,
-            email: r.email,
-            password_hash: r.password_hash,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-        }))
+        Ok(row.map(into_user))
     }
 
     async fn update_password_hash(&self, id: Uuid, new_hash: &str) -> Result<(), UserError> {
@@ -173,6 +153,29 @@ impl UserRepository for PgUserRepository {
             r#"UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1"#,
             id,
             new_hash,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
+        Ok(())
+    }
+
+    async fn mark_email_verified(&self, id: Uuid) -> Result<(), UserError> {
+        sqlx::query!(
+            r#"UPDATE users SET email_verified = true, updated_at = now() WHERE id = $1"#,
+            id,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
+        Ok(())
+    }
+
+    async fn update_email(&self, id: Uuid, new_email: &str) -> Result<(), UserError> {
+        sqlx::query!(
+            r#"UPDATE users SET email = $2, email_verified = true, updated_at = now() WHERE id = $1"#,
+            id,
+            new_email,
         )
         .execute(&self.pool)
         .await

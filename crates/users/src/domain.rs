@@ -14,6 +14,8 @@ pub struct User {
     pub username: String,
     pub email: String,
     pub password_hash: String,
+    /// 邮箱是否已通过验证信确认。
+    pub email_verified: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

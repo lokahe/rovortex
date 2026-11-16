@@ -12,6 +12,8 @@
 
 pub mod auth;
 pub mod domain;
+pub mod email_verification;
+pub mod mail;
 pub mod password;
 pub mod refresh_token;
 pub mod repository;
@@ -19,6 +21,10 @@ pub mod service;
 
 pub use auth::TokenSigner;
 pub use domain::{NewUser, User, UserError};
+pub use email_verification::{
+    EmailVerificationRepository, NewEmailVerification, VerificationPurpose,
+};
+pub use mail::{MailError, MailSender};
 pub use refresh_token::{NewRefreshToken, RefreshTokenRepository};
 pub use repository::UserRepository;
 pub use service::UserService;

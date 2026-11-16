@@ -4,6 +4,7 @@ members = [
     "crates/users",
     "crates/gateway_api",
     "crates/storage_pg",
+    "crates/infra_mail",
 ]
 
 [workspace.package]
