@@ -8,7 +8,7 @@ use std::sync::Arc;
 use infra_mail::ResendSender;
 use rovortex_users::{TokenSigner, UserService};
 use sqlx::PgPool;
-use storage_pg::{PgEmailVerificationRepository, PgRefreshTokenRepository, PgUserRepository};
+use storage_pg::{PgAuditRepository, PgEmailVerificationRepository, PgRefreshTokenRepository, PgUserRepository};
 
 use crate::rate_limit::InMemoryLoginGuard;
 
@@ -59,7 +59,8 @@ impl AppState {
 
         let repo = Arc::new(PgUserRepository::from_pool(pool.clone()));
         let refresh_repo = Arc::new(PgRefreshTokenRepository::from_pool(pool.clone()));
-        let email_verif_repo = Arc::new(PgEmailVerificationRepository::from_pool(pool));
+        let email_verif_repo = Arc::new(PgEmailVerificationRepository::from_pool(pool.clone()));
+        let audit_repo = Arc::new(PgAuditRepository::from_pool(pool));
 
         // 邮件发送：有 RESEND_API_KEY 用 Resend；没有则退化为日志（本地开发）。
         let mail: Arc<dyn rovortex_users::MailSender> = match &config.resend_api_key {
@@ -74,6 +75,7 @@ impl AppState {
                 email_verif_repo,
                 mail,
                 Arc::new(InMemoryLoginGuard::new()),
+                audit_repo,
                 config.verify_url_base,
             )),
             tokens: Arc::new(TokenSigner::new(&config.jwt_secret)),

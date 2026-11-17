@@ -58,11 +58,14 @@ pub struct AuthResponse {
 /// POST /api/users/register —— 201 Created
 pub async fn register(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<AuthResponse>), ApiError> {
+    let ip = client_ip(&headers, addr);
     let session = state
         .users
-        .register(&req.username, &req.email, &req.password)
+        .register(&req.username, &req.email, &req.password, &ip)
         .await?;
     let token = state.tokens.sign(session.user.id)?;
     Ok((
@@ -88,7 +91,10 @@ pub async fn login(
 ) -> Result<Json<AuthResponse>, ApiError> {
     let ip = client_ip(&headers, addr);
     let key = rovortex_users::guard_key(&ip, &req.login);
-    let session = state.users.login(&key, &req.login, &req.password).await?;
+    let session = state
+        .users
+        .login(&key, &req.login, &req.password, &ip)
+        .await?;
     let token = state.tokens.sign(session.user.id)?;
     Ok(Json(AuthResponse {
         user: session.user.into(),
@@ -99,7 +105,7 @@ pub async fn login(
 }
 
 /// Caddy 反代会覆盖 X-Forwarded-For 为真实客户端地址；直连时回退 socket 地址。
-fn client_ip(headers: &axum::http::HeaderMap, addr: SocketAddr) -> String {
+pub fn client_ip(headers: &axum::http::HeaderMap, addr: SocketAddr) -> String {
     headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())

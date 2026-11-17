@@ -10,6 +10,7 @@
 //!
 //! 依赖方向：`gateway_api → users`，本 crate 永远不反向依赖表现层。
 
+pub mod audit;
 pub mod auth;
 pub mod domain;
 pub mod email_verification;
@@ -20,6 +21,7 @@ pub mod refresh_token;
 pub mod repository;
 pub mod service;
 
+pub use audit::{AuditAction, AuditRepository, NewAuditLog};
 pub use auth::TokenSigner;
 pub use domain::{NewUser, User, UserError};
 pub use email_verification::{

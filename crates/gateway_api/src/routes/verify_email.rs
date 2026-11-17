@@ -1,12 +1,14 @@
 //! 邮箱验证接口：请求验证信 / 点击确认链接。
 
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
+use std::net::SocketAddr;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 
 use crate::error::ApiError;
+use crate::routes::users::client_ip;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -22,18 +24,27 @@ pub struct ConfirmParams {
 /// POST /api/auth/verify-email/request —— 202 Accepted（防枚举：恒 202）
 pub async fn request_verification(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<VerifyEmailRequest>,
 ) -> Result<StatusCode, ApiError> {
-    state.users.request_email_verification(&req.email).await?;
+    let ip = client_ip(&headers, addr);
+    state
+        .users
+        .request_email_verification(&req.email, &ip)
+        .await?;
     Ok(StatusCode::ACCEPTED)
 }
 
 /// GET /api/auth/verify-email/confirm?token=... —— 200 结果页
 pub async fn confirm(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<ConfirmParams>,
 ) -> Result<Response, Response> {
-    match state.users.confirm_email_verification(&params.token).await {
+    let ip = client_ip(&headers, addr);
+    match state.users.confirm_email_verification(&params.token, &ip).await {
         Ok(()) => Ok(result_page("验证成功", "你的邮箱已完成验证，可以关闭此页面。")),
         Err(_) => Err(result_page(
             "链接无效",
@@ -45,9 +56,12 @@ pub async fn confirm(
 /// GET /api/auth/email-change/confirm?token=... —— 200 结果页
 pub async fn confirm_email_change(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<ConfirmParams>,
 ) -> Result<Response, Response> {
-    match state.users.confirm_email_change(&params.token).await {
+    let ip = client_ip(&headers, addr);
+    match state.users.confirm_email_change(&params.token, &ip).await {
         Ok(()) => Ok(result_page("变更成功", "你的账号邮箱已更新。")),
         Err(_) => Err(result_page(
             "链接无效",

@@ -1,8 +1,9 @@
 //! 会话续期与登出接口。
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
+use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
 use rovortex_users::User;
 use serde::Deserialize;
@@ -39,9 +40,12 @@ fn auth_response(
 /// POST /api/auth/refresh —— 200 OK（轮换：旧 refresh token 作废）
 pub async fn refresh(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    let session = state.users.refresh(&req.refresh_token).await?;
+    let ip = crate::routes::users::client_ip(&headers, addr);
+    let session = state.users.refresh(&req.refresh_token, &ip).await?;
     Ok(Json(auth_response(
         &state.tokens,
         session.user,
@@ -53,8 +57,11 @@ pub async fn refresh(
 /// POST /api/auth/logout —— 204 No Content（幂等）
 pub async fn logout(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<LogoutRequest>,
 ) -> Result<StatusCode, ApiError> {
-    state.users.logout(&req.refresh_token).await?;
+    let ip = crate::routes::users::client_ip(&headers, addr);
+    state.users.logout(&req.refresh_token, &ip).await?;
     Ok(StatusCode::NO_CONTENT)
 }

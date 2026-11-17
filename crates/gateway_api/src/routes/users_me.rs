@@ -1,7 +1,8 @@
 //! 受保护的用户接口：要求有效的 Bearer token。
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
+use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
 use rovortex_users::UserError;
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::routes::auth::AuthUser;
+use crate::routes::users::client_ip;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -57,11 +59,14 @@ pub async fn me(
 pub async fn change_password(
     State(state): State<AppState>,
     auth: AuthUser,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<axum::http::StatusCode, ApiError> {
+    let ip = client_ip(&headers, addr);
     state
         .users
-        .change_password(auth.user_id, &req.old_password, &req.new_password)
+        .change_password(auth.user_id, &req.old_password, &req.new_password, &ip)
         .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -70,11 +75,14 @@ pub async fn change_password(
 pub async fn change_email(
     State(state): State<AppState>,
     auth: AuthUser,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ChangeEmailRequest>,
 ) -> Result<axum::http::StatusCode, ApiError> {
+    let ip = client_ip(&headers, addr);
     state
         .users
-        .request_email_change(auth.user_id, &req.new_email)
+        .request_email_change(auth.user_id, &req.new_email, &ip)
         .await?;
     Ok(axum::http::StatusCode::ACCEPTED)
 }
