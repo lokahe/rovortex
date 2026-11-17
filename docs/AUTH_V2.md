@@ -1,7 +1,8 @@
 # 认证体系 v2 设计：OAuth 一键登录 + 邮箱 Magic Link（全程免密）
 
-> 状态：**设计稿（未实施）**。P1（refresh token / 改密码 / 会话管理）落地后启动。
+> 状态：**GitHub OAuth 已实施**（P5-1，2026-11）。Magic Link 待实施。
 > 前置阅读：docs/ARCHITECTURE.md（分层）、docs/DATABASE.md（选型）。
+> 时序图：[oauth-sequence-diagram.html](./oauth-sequence-diagram.html) —— 授权码流程四阶段可视化。
 
 ## 1. 目标
 
