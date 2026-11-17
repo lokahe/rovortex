@@ -48,6 +48,8 @@ impl Config {
 pub struct AppState {
     pub users: Arc<UserService>,
     pub tokens: Arc<TokenSigner>,
+    /// 进程内 HTTP 指标（/metrics 暴露）。
+    pub metrics: Arc<crate::metrics::Metrics>,
 }
 
 impl AppState {
@@ -75,6 +77,7 @@ impl AppState {
                 config.verify_url_base,
             )),
             tokens: Arc::new(TokenSigner::new(&config.jwt_secret)),
+            metrics: Arc::new(crate::metrics::Metrics::new()),
         }
     }
 }

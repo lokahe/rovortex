@@ -1,17 +1,23 @@
-//! 可观测性中间件：request_id 贯穿 + 访问日志。
+//! 可观测性中间件：request_id 贯穿 + 访问日志 + HTTP 指标。
 //!
 //! 每个请求一行结构化日志（method / path / status / 耗时），
 //! request_id 同时回写到响应头 `x-request-id`，便于客户端报障时对账。
 
+use axum::extract::State;
 use axum::http::header::HeaderName;
+use axum::http::HeaderValue;
 use axum::middleware::Next;
 use axum::response::Response;
 use tracing::info_span;
 
+use crate::state::AppState;
+
 pub const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
-/// 入口中间件：确定 request_id → 开 tracing span（后续所有日志自动携带）→ 记录耗时。
+/// 入口中间件：确定 request_id → 开 tracing span（后续所有日志自动携带）→
+/// 记录耗时 + 按“路由模板”统计指标。
 pub async fn request_id_and_log(
+    State(state): State<AppState>,
     req: axum::extract::Request,
     next: Next,
 ) -> Response {
@@ -25,6 +31,8 @@ pub async fn request_id_and_log(
 
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    // /metrics 自身不统计，避免自指增长。
+    let track = path != "/metrics";
 
     let span = info_span!(
         "http_request",
@@ -45,18 +53,41 @@ pub async fn request_id_and_log(
         "request completed"
     );
 
+    if track {
+        state
+            .metrics
+            .observe(&route_template(&path), method.as_str(), status.as_u16(), elapsed_ms);
+    }
+
     // 失败请求在 INFO 日志之上多一行 ERROR，排障时先看到它。
     if status.is_server_error() {
         tracing::error!(status = status.as_u16(), "request failed with server error");
     }
 
-    if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert(X_REQUEST_ID, value);
     }
     response
 }
 
-/// 128-bit 随机性取 hex 前 16 位；碰撞概率在单实例 QPS 下可忽略。
+/// 路径 → 路由模板：把 UUID 等路径参数归一成 `:id`，让指标标签基数可控。
+fn route_template(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for seg in path.split('/') {
+        if seg.is_empty() {
+            continue;
+        }
+        if seg.len() == 36 && seg.chars().filter(|c| *c == '-').count() == 4 {
+            out.push_str("/:id");
+        } else {
+            out.push('/');
+            out.push_str(seg);
+        }
+    }
+    out
+}
+
+/// 128-bit 混合熵取 hex 前 16 位；单实例 QPS 下碰撞概率可忽略。
 fn new_request_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()

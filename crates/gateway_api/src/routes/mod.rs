@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod health;
+pub mod metrics;
 pub mod session;
 pub mod users;
 pub mod users_me;
@@ -25,6 +26,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health::handler))
+        .route("/metrics", get(metrics::handler))
         .route("/api/users/register", post(users::register))
         .route("/api/users/login", post(users::login))
         .route("/api/auth/refresh", post(session::refresh))
