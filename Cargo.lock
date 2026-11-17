@@ -1441,8 +1441,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "infra_mail",
+ "rand_core 0.6.4",
+ "reqwest",
  "rovortex-users",
  "serde",
  "serde_json",

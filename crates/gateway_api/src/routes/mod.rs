@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod health;
 pub mod metrics;
+pub mod oauth;
 pub mod session;
 pub mod users;
 pub mod users_me;
@@ -34,6 +35,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/verify-email/request", post(verify_email::request_verification))
         .route("/api/auth/verify-email/confirm", get(verify_email::confirm))
         .route("/api/auth/email-change/confirm", get(verify_email::confirm_email_change))
+        .route("/api/auth/oauth/github", get(oauth::github_authorize))
+        .route("/api/auth/oauth/github/callback", get(oauth::github_callback))
         .merge(protected)
         .with_state(state)
 }

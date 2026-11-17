@@ -15,6 +15,7 @@ pub mod auth;
 pub mod domain;
 pub mod email_verification;
 pub mod mail;
+pub mod oauth_identity;
 pub mod password;
 pub mod rate_limit;
 pub mod refresh_token;
@@ -28,6 +29,7 @@ pub use email_verification::{
     EmailVerificationRepository, NewEmailVerification, VerificationPurpose,
 };
 pub use mail::{MailError, MailSender};
+pub use oauth_identity::{ExternalIdentity, NewExternalIdentity, OauthIdentityRepository};
 pub use rate_limit::{LoginGuard, guard_key};
 pub use refresh_token::{NewRefreshToken, RefreshTokenRepository};
 pub use repository::UserRepository;

@@ -22,7 +22,7 @@ pub struct LogoutRequest {
     pub refresh_token: String,
 }
 
-fn auth_response(
+pub fn auth_response(
     tokens: &rovortex_users::TokenSigner,
     user: User,
     refresh_token: String,

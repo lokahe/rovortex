@@ -12,6 +12,7 @@ use crate::email_verification::{
     EmailVerificationRepository, NewEmailVerification, VerificationPurpose,
 };
 use crate::mail::MailSender;
+use crate::oauth_identity::{NewExternalIdentity, OauthIdentityRepository};
 use crate::password::{hash_password, verify_password};
 use crate::rate_limit::LoginGuard;
 use crate::refresh_token::{NewRefreshToken, RefreshTokenRepository};
@@ -41,6 +42,8 @@ pub struct UserService {
     login_guard: Arc<dyn LoginGuard>,
     /// 审计日志（安全动作证据链；写失败只记日志不阻断业务）。
     audit: Arc<dyn AuditRepository>,
+    /// 外部身份（OAuth / Magic Link）仓储。
+    identities: Arc<dyn OauthIdentityRepository>,
     /// 验证邮件里的确认链接前缀（如 https://api.example.com）。
     verify_url_base: String,
 }
@@ -54,6 +57,7 @@ impl UserService {
         mail: Arc<dyn MailSender>,
         login_guard: Arc<dyn LoginGuard>,
         audit: Arc<dyn AuditRepository>,
+        identities: Arc<dyn OauthIdentityRepository>,
         verify_url_base: String,
     ) -> Self {
         Self {
@@ -63,6 +67,7 @@ impl UserService {
             mail,
             login_guard,
             audit,
+            identities,
             verify_url_base,
         }
     }
@@ -98,7 +103,7 @@ impl UserService {
             .create(NewUser {
                 username: username.into(),
                 email: email.into(),
-                password_hash,
+                password_hash: Some(password_hash),
             })
             .await?;
         self.audit(
@@ -175,7 +180,11 @@ impl UserService {
             .await?
             .ok_or(UserError::InvalidCredentials)?;
 
-        if !verify_password(password, &user.password_hash) {
+        // 无密码账号（纯 OAuth/Magic 用户）：不提示「未设置密码」，恒 InvalidCredentials 防枚举。
+        let Some(hash) = user.password_hash.as_deref() else {
+            return Err(UserError::InvalidCredentials);
+        };
+        if !verify_password(password, hash) {
             return Err(UserError::InvalidCredentials);
         }
         self.issue_session(user).await
@@ -222,6 +231,8 @@ impl UserService {
     }
 
     /// 修改密码：验证旧密码 → 重哈希 → 吊销该用户全部会话。
+    ///
+    /// 无密码账号（OAuth/Magic 用户首次设密码）请用 [`UserService::set_password`]。
     pub async fn change_password(
         &self,
         user_id: Uuid,
@@ -235,7 +246,10 @@ impl UserService {
             .find_by_id(user_id)
             .await?
             .ok_or(UserError::UserNotFound)?;
-        if !verify_password(old_password, &user.password_hash) {
+        let Some(old_hash) = user.password_hash.as_deref() else {
+            return Err(UserError::InvalidCredentials);
+        };
+        if !verify_password(old_password, old_hash) {
             self.audit(Some(user_id), AuditAction::LoginFailure, "change_password: old password mismatch", client_ip);
             return Err(UserError::InvalidCredentials);
         }
@@ -245,6 +259,144 @@ impl UserService {
             .await?;
         self.refresh.revoke_all_for_user(user_id).await?;
         self.audit(Some(user_id), AuditAction::PasswordChanged, "", client_ip);
+        Ok(())
+    }
+
+    /// 外部身份登录（OAuth 回调 / Magic Link 确认后的共同入口）。
+    ///
+    /// 规则（按序）：
+    /// 1. `(provider, provider_uid)` 已绑定 → 直接登录既有账号；
+    /// 2. 未绑定但邮箱已被占用 → 挂到既有账号（账号合并，不建第二个账号）；
+    /// 3. 全新 → 自动注册（username 自动生成去重，email_verified = true）。
+    pub async fn login_with_identity(
+        &self,
+        provider: &str,
+        provider_uid: &str,
+        email: Option<&str>,
+        client_ip: &str,
+    ) -> Result<Session, UserError> {
+        // 1. 已绑定：直接登录
+        if let Some(identity) = self.identities.find_by_external(provider, provider_uid).await? {
+            let user = self
+                .repo
+                .find_by_id(identity.user_id)
+                .await?
+                .ok_or(UserError::UserNotFound)?;
+            self.audit(
+                Some(user.id),
+                AuditAction::LoginSuccess,
+                format!("provider={provider}"),
+                client_ip,
+            );
+            return self.issue_session(user).await;
+        }
+
+        // 2/3. 未绑定：需要 email 建账号或合并
+        let email = email.ok_or_else(|| {
+            UserError::Hashing(format!("provider {provider} reported no email; cannot bind"))
+        })?;
+        validate_email(email)?;
+
+        let user = match self.repo.find_by_email(email).await? {
+            // 2. 同邮箱既有账号：合并身份（同一 user 可绑多平台）
+            Some(user) => {
+                self.identities
+                    .create_for_user(NewExternalIdentity {
+                        user_id: user.id,
+                        provider: provider.into(),
+                        provider_uid: provider_uid.into(),
+                        email: Some(email.into()),
+                    })
+                    .await?;
+                user
+            }
+            // 3. 全新用户：自动注册（平台已验证邮箱 → 直接标记 email_verified）
+            None => {
+                let username = self.unique_username_from(email).await?;
+                let mut user = self
+                    .repo
+                    .create(NewUser {
+                        username,
+                        email: email.into(),
+                        password_hash: None,
+                    })
+                    .await?;
+                self.repo.mark_email_verified(user.id).await?;
+                user.email_verified = true;
+                self.identities
+                    .create_for_user(NewExternalIdentity {
+                        user_id: user.id,
+                        provider: provider.into(),
+                        provider_uid: provider_uid.into(),
+                        email: Some(email.into()),
+                    })
+                    .await?;
+                self.audit(
+                    Some(user.id),
+                    AuditAction::Register,
+                    format!("username={}", user.username),
+                    client_ip,
+                );
+                user
+            }
+        };
+
+        self.audit(
+            Some(user.id),
+            AuditAction::LoginSuccess,
+            format!("provider={provider}"),
+            client_ip,
+        );
+        self.issue_session(user).await
+    }
+
+    /// 从邮箱前缀推导用户名，冲突时追加数字后缀（如 alice → alice2 → alice3）。
+    async fn unique_username_from(&self, email: &str) -> Result<String, UserError> {
+        let base: String = email
+            .split('@')
+            .next()
+            .unwrap_or("user")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let base = if base.len() >= 3 {
+            base
+        } else {
+            format!("user{base}")
+        };
+        let mut candidate = base.clone();
+        let mut n = 1u32;
+        while self.repo.find_by_username(&candidate).await?.is_some() {
+            n += 1;
+            candidate = format!("{base}{n}");
+        }
+        validate_username(&candidate)?;
+        Ok(candidate)
+    }
+
+    /// 为无密码账号设置初值密码（不需要验旧密码）；已有密码的账号必须走 change_password。
+    pub async fn set_password(
+        &self,
+        user_id: Uuid,
+        new_password: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
+        validate_password(new_password)?;
+        let user = self
+            .repo
+            .find_by_id(user_id)
+            .await?
+            .ok_or(UserError::UserNotFound)?;
+        if user.password_hash.is_some() {
+            return Err(UserError::InvalidCredentials);
+        }
+        // 无密码账号必须至少绑定一种外部身份，否则账号将完全无法登录
+        if self.identities.list_for_user(user_id).await?.is_empty() {
+            return Err(UserError::UserNotFound);
+        }
+        let new_hash = hash_password(new_password)?;
+        self.repo.update_password_hash(user_id, &new_hash).await?;
+        self.audit(Some(user_id), AuditAction::PasswordChanged, "set_password", client_ip);
         Ok(())
     }
 
@@ -463,6 +615,7 @@ mod tests_refresh {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oauth_identity::{ExternalIdentity, NewExternalIdentity};
     use crate::refresh_token::NewRefreshToken;
     use crate::repository::UserRepository;
     use chrono::{Duration, Utc};
@@ -553,7 +706,7 @@ mod tests {
         ) -> Result<(), UserError> {
             let mut store = self.store.lock().unwrap();
             let user = store.get_mut(&id).ok_or(UserError::UserNotFound)?;
-            user.password_hash = new_hash.to_string();
+            user.password_hash = Some(new_hash.to_string());
             user.updated_at = Utc::now();
             Ok(())
         }
@@ -747,10 +900,99 @@ mod tests {
                 mail.clone() as Arc<dyn MailSender>,
                 Arc::new(NoopLoginGuard),
                 Arc::new(TestAuditRepository::default()),
+                Arc::new(TestIdentityRepository::new()),
                 "http://localhost:8080".to_string(),
             ),
             mail,
         )
+    }
+
+    /// 测试用外部身份仓储桩。
+    #[derive(Default)]
+    struct TestIdentityRepository {
+        identities: Mutex<Vec<(Uuid, String, String)>>,
+    }
+
+    impl TestIdentityRepository {
+        fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OauthIdentityRepository for TestIdentityRepository {
+        async fn find_by_external(
+            &self,
+            provider: &str,
+            provider_uid: &str,
+        ) -> Result<Option<ExternalIdentity>, UserError> {
+            let list = self.identities.lock().unwrap();
+            Ok(list
+                .iter()
+                .find(|(_, p, u)| p == provider && u == provider_uid)
+                .map(|(uid, p, u)| ExternalIdentity {
+                    id: Uuid::now_v7(),
+                    user_id: *uid,
+                    provider: p.clone(),
+                    provider_uid: u.clone(),
+                    email: None,
+                    created_at: Utc::now(),
+                }))
+        }
+
+        async fn create_for_user(
+            &self,
+            identity: NewExternalIdentity,
+        ) -> Result<ExternalIdentity, UserError> {
+            let mut list = self.identities.lock().unwrap();
+            let exists = list
+                .iter()
+                .any(|(_, p, u)| *p == identity.provider && *u == identity.provider_uid);
+            if exists {
+                return Err(UserError::Hashing("identity already bound".into()));
+            }
+            let created = ExternalIdentity {
+                id: Uuid::now_v7(),
+                user_id: identity.user_id,
+                provider: identity.provider,
+                provider_uid: identity.provider_uid,
+                email: identity.email,
+                created_at: Utc::now(),
+            };
+            list.push((
+                created.user_id,
+                created.provider.clone(),
+                created.provider_uid.clone(),
+            ));
+            Ok(created)
+        }
+
+        async fn list_for_user(
+            &self,
+            user_id: Uuid,
+        ) -> Result<Vec<ExternalIdentity>, UserError> {
+            let list = self.identities.lock().unwrap();
+            Ok(list
+                .iter()
+                .filter(|(uid, _, _)| *uid == user_id)
+                .map(|(_, p, u)| ExternalIdentity {
+                    id: Uuid::now_v7(),
+                    user_id,
+                    provider: p.clone(),
+                    provider_uid: u.clone(),
+                    email: None,
+                    created_at: Utc::now(),
+                })
+                .collect())
+        }
+
+        async fn remove(&self, user_id: Uuid, provider: &str) -> Result<(), UserError> {
+            self.identities
+                .lock()
+                .unwrap()
+                .retain(|(uid, p, _)| !(*uid == user_id && p == provider));
+            Ok(())
+        }
     }
 
     /// 测试用直通限流。
@@ -1041,6 +1283,7 @@ mod tests {
             Arc::new(TestMailSender::default()) as Arc<dyn MailSender>,
             guard.clone() as Arc<dyn LoginGuard>,
             Arc::new(TestAuditRepository::default()) as Arc<dyn AuditRepository>,
+                Arc::new(TestIdentityRepository::new()),
             "http://localhost:8080".to_string(),
         );
         svc.register("kate", "kate@example.com", "Str0ng-pass!", "9.9.9.9").await.unwrap();
@@ -1065,6 +1308,7 @@ mod tests {
             Arc::new(TestMailSender::default()) as Arc<dyn MailSender>,
             guard.clone() as Arc<dyn LoginGuard>,
             Arc::new(TestAuditRepository::default()) as Arc<dyn AuditRepository>,
+                Arc::new(TestIdentityRepository::new()),
             "http://localhost:8080".to_string(),
         );
         svc.register("liam", "liam@example.com", "Str0ng-pass!", "9.9.9.9").await.unwrap();
@@ -1092,6 +1336,7 @@ mod tests {
             Arc::new(TestMailSender::default()) as Arc<dyn MailSender>,
             guard.clone() as Arc<dyn LoginGuard>,
             Arc::new(TestAuditRepository::default()) as Arc<dyn AuditRepository>,
+                Arc::new(TestIdentityRepository::new()),
             "http://localhost:8080".to_string(),
         );
 
@@ -1117,6 +1362,7 @@ mod tests {
             Arc::new(TestMailSender::default()) as Arc<dyn MailSender>,
             Arc::new(NoopLoginGuard) as Arc<dyn LoginGuard>,
             audit.clone() as Arc<dyn AuditRepository>,
+            Arc::new(TestIdentityRepository::new()),
             "http://localhost:8080".to_string(),
         );
 
@@ -1134,5 +1380,94 @@ mod tests {
         assert!(actions.contains(&AuditAction::LoginSuccess));
         assert!(actions.contains(&AuditAction::PasswordChanged));
         assert_eq!(events.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn oauth_new_user_auto_registers_and_logs_in() {
+        let svc = service();
+        let s1 = svc
+            .login_with_identity("github", "10001", Some("nina@example.com"), "5.5.5.5")
+            .await
+            .unwrap();
+        assert_eq!(s1.user.email, "nina@example.com");
+        assert!(s1.user.email_verified, "platform-verified email");
+        assert!(s1.user.password_hash.is_none(), "no password for oauth user");
+
+        // username 从邮箱前缀推导
+        assert_eq!(s1.user.username, "nina");
+
+        // 二次登录：同身份直接登录既有账号（不新建用户、身份不重复绑定）
+        let s2 = svc
+            .login_with_identity("github", "10001", Some("nina@example.com"), "5.5.5.5")
+            .await
+            .unwrap();
+        assert_eq!(s2.user.id, s1.user.id);
+    }
+
+    #[tokio::test]
+    async fn oauth_same_email_merges_into_existing_account() {
+        let svc = service();
+        // 先用密码注册
+        let password_user = svc
+            .register("oscar", "oscar@example.com", "Str0ng-pass!", "127.0.0.1")
+            .await
+            .unwrap();
+        // GitHub 身份首次登录：同邮箱 → 挂到既有账号
+        let s = svc
+            .login_with_identity("github", "20002", Some("oscar@example.com"), "5.5.5.5")
+            .await
+            .unwrap();
+        assert_eq!(s.user.id, password_user.user.id, "merge not duplicate");
+        assert!(s.user.password_hash.is_some(), "password intact after merge");
+
+        // 密码登录仍然可用
+        let by_password = svc
+            .login("k:o", "oscar@example.com", "Str0ng-pass!", "127.0.0.1")
+            .await
+            .unwrap();
+        assert_eq!(by_password.user.id, password_user.user.id);
+    }
+
+    #[tokio::test]
+    async fn oauth_username_conflict_gets_suffix() {
+        let svc = service();
+        // 占用 nina 用户名
+        svc.register("nina", "nina-plain@example.com", "Str0ng-pass!", "127.0.0.1")
+            .await
+            .unwrap();
+        // GitHub 邮箱前缀同为 nina → 自动去重为 nina2
+        let s = svc
+            .login_with_identity("github", "30003", Some("nina@example.com"), "5.5.5.5")
+            .await
+            .unwrap();
+        assert_eq!(s.user.username, "nina2");
+    }
+
+    #[tokio::test]
+    async fn passwordless_account_rejects_password_login_and_can_set_password() {
+        let svc = service();
+        let s = svc
+            .login_with_identity("github", "40004", Some("pia@example.com"), "5.5.5.5")
+            .await
+            .unwrap();
+
+        // 无密码账号密码登录：恒 InvalidCredentials（防枚举，不提示未设置密码）
+        assert!(matches!(
+            svc.login("k:p", "pia@example.com", "whatever-pass", "127.0.0.1").await,
+            Err(UserError::InvalidCredentials)
+        ));
+
+        // set_password：无密码 → 免验旧密码，设置后密码登录可用
+        svc.set_password(s.user.id, "N3w-pass-word!", "5.5.5.5").await.unwrap();
+        assert!(svc
+            .login("k:p", "pia@example.com", "N3w-pass-word!", "127.0.0.1")
+            .await
+            .is_ok());
+
+        // 已有密码后再 set_password：拒绝（必须走 change_password）
+        assert!(matches!(
+            svc.set_password(s.user.id, "An0ther-pass!", "5.5.5.5").await,
+            Err(UserError::InvalidCredentials)
+        ));
     }
 }

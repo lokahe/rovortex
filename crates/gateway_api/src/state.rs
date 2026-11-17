@@ -8,7 +8,7 @@ use std::sync::Arc;
 use infra_mail::ResendSender;
 use rovortex_users::{TokenSigner, UserService};
 use sqlx::PgPool;
-use storage_pg::{PgAuditRepository, PgEmailVerificationRepository, PgRefreshTokenRepository, PgUserRepository};
+use storage_pg::{PgAuditRepository, PgEmailVerificationRepository, PgOauthIdentityRepository, PgRefreshTokenRepository, PgUserRepository};
 
 use crate::rate_limit::InMemoryLoginGuard;
 
@@ -19,6 +19,8 @@ struct Config {
     mail_from: String,
     /// Resend API key；缺省时邮件发送退化为日志输出（本地无外部依赖开发）。
     resend_api_key: Option<String>,
+    /// GitHub OAuth App 凭据；两者都配置时才启用 GitHub 登录路由。
+    oauth_github: Option<(String, String)>,
     /// 验证邮件里确认链接的前缀。
     verify_url_base: String,
 }
@@ -37,6 +39,13 @@ impl Config {
             resend_api_key: std::env::var("RESEND_API_KEY")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            oauth_github: match (
+                std::env::var("OAUTH_GITHUB_CLIENT_ID").ok().filter(|s| !s.is_empty()),
+                std::env::var("OAUTH_GITHUB_CLIENT_SECRET").ok().filter(|s| !s.is_empty()),
+            ) {
+                (Some(id), Some(secret)) => Some((id, secret)),
+                _ => None,
+            },
             verify_url_base: std::env::var("ROVORTEX_VERIFY_URL_BASE")
                 .unwrap_or_else(|_| "http://localhost:8080".to_string()),
         }
@@ -50,6 +59,8 @@ pub struct AppState {
     pub tokens: Arc<TokenSigner>,
     /// 进程内 HTTP 指标（/metrics 暴露）。
     pub metrics: Arc<crate::metrics::Metrics>,
+    /// GitHub OAuth 凭据；None = 未配置，路由返回 404。
+    pub oauth_github: Option<crate::routes::oauth::GithubOAuthConfig>,
 }
 
 impl AppState {
@@ -60,7 +71,8 @@ impl AppState {
         let repo = Arc::new(PgUserRepository::from_pool(pool.clone()));
         let refresh_repo = Arc::new(PgRefreshTokenRepository::from_pool(pool.clone()));
         let email_verif_repo = Arc::new(PgEmailVerificationRepository::from_pool(pool.clone()));
-        let audit_repo = Arc::new(PgAuditRepository::from_pool(pool));
+        let audit_repo = Arc::new(PgAuditRepository::from_pool(pool.clone()));
+        let identity_repo = Arc::new(PgOauthIdentityRepository::from_pool(pool));
 
         // 邮件发送：有 RESEND_API_KEY 用 Resend；没有则退化为日志（本地开发）。
         let mail: Arc<dyn rovortex_users::MailSender> = match &config.resend_api_key {
@@ -76,10 +88,17 @@ impl AppState {
                 mail,
                 Arc::new(InMemoryLoginGuard::new()),
                 audit_repo,
+                identity_repo,
                 config.verify_url_base,
             )),
             tokens: Arc::new(TokenSigner::new(&config.jwt_secret)),
             metrics: Arc::new(crate::metrics::Metrics::new()),
+            oauth_github: config.oauth_github.map(|(client_id, client_secret)| {
+                crate::routes::oauth::GithubOAuthConfig {
+                    client_id,
+                    client_secret,
+                }
+            }),
         }
     }
 }

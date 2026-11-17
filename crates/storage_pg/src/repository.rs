@@ -41,7 +41,7 @@ mod row {
         pub email: String,
         #[allow(dead_code)]
         pub email_key: String,
-        pub password_hash: String,
+        pub password_hash: Option<String>,
         #[allow(dead_code)]
         pub status: i16,
         pub email_verified: bool,
