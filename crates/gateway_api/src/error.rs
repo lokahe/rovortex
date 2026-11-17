@@ -28,6 +28,9 @@ impl IntoResponse for ApiError {
             UserError::InvalidCredentials | UserError::InvalidRefreshToken => {
                 (StatusCode::UNAUTHORIZED, "invalid_credentials")
             }
+            UserError::TooManyAttempts => {
+                (StatusCode::TOO_MANY_REQUESTS, "too_many_attempts")
+            }
             UserError::Hashing(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
 

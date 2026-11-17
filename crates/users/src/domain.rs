@@ -55,6 +55,9 @@ pub enum UserError {
     #[error("refresh token is invalid or expired")]
     InvalidRefreshToken,
 
+    #[error("too many attempts, try again later")]
+    TooManyAttempts,
+
     #[error("password hashing error: {0}")]
     Hashing(String),
 }

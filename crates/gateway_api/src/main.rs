@@ -4,6 +4,7 @@
 //! 所有业务规则位于 `rovortex-users` 等业务模块。
 
 mod error;
+mod rate_limit;
 mod routes;
 mod state;
 
@@ -38,10 +39,14 @@ async fn main() {
     tracing::info!("Rovortex gateway listening on http://{addr}");
 
     // 优雅停机：Ctrl-C 后停止接收新连接，等待存量请求完成。
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server error");
+    // with_connect_info：login 限流需要客户端地址（ConnectInfo 提取器）。
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("server error");
 }
 
 async fn shutdown_signal() {

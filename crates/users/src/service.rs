@@ -12,6 +12,7 @@ use crate::email_verification::{
 };
 use crate::mail::MailSender;
 use crate::password::{hash_password, verify_password};
+use crate::rate_limit::LoginGuard;
 use crate::refresh_token::{NewRefreshToken, RefreshTokenRepository};
 use crate::repository::UserRepository;
 
@@ -35,6 +36,8 @@ pub struct UserService {
     refresh: Arc<dyn RefreshTokenRepository>,
     email_verifications: Arc<dyn EmailVerificationRepository>,
     mail: Arc<dyn MailSender>,
+    /// 登录限流（可为 NoopLoginGuard 关闭，如测试）。
+    login_guard: Arc<dyn LoginGuard>,
     /// 验证邮件里的确认链接前缀（如 https://api.example.com）。
     verify_url_base: String,
 }
@@ -46,6 +49,7 @@ impl UserService {
         refresh: Arc<dyn RefreshTokenRepository>,
         email_verifications: Arc<dyn EmailVerificationRepository>,
         mail: Arc<dyn MailSender>,
+        login_guard: Arc<dyn LoginGuard>,
         verify_url_base: String,
     ) -> Self {
         Self {
@@ -53,6 +57,7 @@ impl UserService {
             refresh,
             email_verifications,
             mail,
+            login_guard,
             verify_url_base,
         }
     }
@@ -97,7 +102,29 @@ impl UserService {
     ///
     /// 安全设计：无论“用户不存在”还是“密码错误”，一律返回 [`UserError::InvalidCredentials`]，
     /// 避免账号枚举攻击。
-    pub async fn login(&self, login: &str, password: &str) -> Result<Session, UserError> {
+    /// 登录：限流检查 → 查用户 → 验密码 → 签会话。
+    ///
+    /// `guard_key` 由表现层按 (client_ip, login) 生成后传入；
+    /// 锁定中的尝试直接拒绝，不消耗 Argon2 算力。
+    pub async fn login(&self, guard_key: &str, login: &str, password: &str) -> Result<Session, UserError> {
+        self.login_guard.check(guard_key).await?;
+        let result = self.login_inner(login, password).await;
+        match &result {
+            Ok(_) => self.login_guard.record_success(guard_key).await,
+            Err(UserError::InvalidCredentials) => {
+                self.login_guard.record_failure(guard_key).await
+            }
+            // 用户不存在也计入失败（防枚举语义下这同样是 InvalidCredentials，
+            // 但防御性处理：其他错误不计入）
+            Err(UserError::UserNotFound) => {
+                self.login_guard.record_failure(guard_key).await
+            }
+            Err(_) => {}
+        }
+        result
+    }
+
+    async fn login_inner(&self, login: &str, password: &str) -> Result<Session, UserError> {
         let user = self
             .repo
             .find_by_login(login)
@@ -626,10 +653,55 @@ mod tests {
                 Arc::new(TestRefreshRepository::new()),
                 Arc::new(TestVerificationRepository::new()),
                 mail.clone() as Arc<dyn MailSender>,
+                Arc::new(NoopLoginGuard),
                 "http://localhost:8080".to_string(),
             ),
             mail,
         )
+    }
+
+    /// 测试用直通限流。
+    struct NoopLoginGuard;
+
+    #[async_trait::async_trait]
+    impl LoginGuard for NoopLoginGuard {
+        async fn check(&self, _key: &str) -> Result<(), UserError> {
+            Ok(())
+        }
+        async fn record_failure(&self, _key: &str) {}
+        async fn record_success(&self, _key: &str) {}
+    }
+
+    /// 计数内存限流桩：可编程阈值，验证 service 层确实调用了 guard。
+    struct CountingGuard {
+        state: Mutex<HashMap<String, u32>>,
+        threshold: u32,
+    }
+
+    impl CountingGuard {
+        fn new(threshold: u32) -> Self {
+            Self { state: Mutex::new(HashMap::new()), threshold }
+        }
+        fn failures(&self, key: &str) -> u32 {
+            *self.state.lock().unwrap().get(key).unwrap_or(&0)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LoginGuard for CountingGuard {
+        async fn check(&self, key: &str) -> Result<(), UserError> {
+            if self.failures(key) >= self.threshold {
+                Err(UserError::TooManyAttempts)
+            } else {
+                Ok(())
+            }
+        }
+        async fn record_failure(&self, key: &str) {
+            *self.state.lock().unwrap().entry(key.to_string()).or_insert(0) += 1;
+        }
+        async fn record_success(&self, key: &str) {
+            self.state.lock().unwrap().remove(key);
+        }
     }
 
     #[tokio::test]
@@ -643,10 +715,10 @@ mod tests {
         assert!(!session.refresh_token.is_empty());
         assert!(session.refresh_expires_at > Utc::now() + Duration::days(29));
 
-        let by_name = svc.login("alice", "Str0ng-pass!").await.unwrap();
+        let by_name = svc.login("k:t1", "alice", "Str0ng-pass!").await.unwrap();
         assert_eq!(by_name.user.id, session.user.id);
         let by_email = svc
-            .login("alice@example.com", "Str0ng-pass!")
+            .login("k:t1", "alice@example.com", "Str0ng-pass!")
             .await
             .unwrap();
         assert_eq!(by_email.user.id, session.user.id);
@@ -708,8 +780,8 @@ mod tests {
             .unwrap();
 
         // 旧密码登录失败，新密码成功
-        assert!(svc.login("frank", "Str0ng-pass!").await.is_err());
-        assert!(svc.login("frank", "N3w-pass-word!").await.is_ok());
+        assert!(svc.login("k:t2", "frank", "Str0ng-pass!").await.is_err());
+        assert!(svc.login("k:t2", "frank", "N3w-pass-word!").await.is_ok());
         // 已发的 refresh token 全部失效
         assert!(matches!(
             svc.refresh(&s.refresh_token).await,
@@ -750,11 +822,11 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            svc.login("carol", "nope-nope-nope").await,
+            svc.login("k:t3", "carol", "nope-nope-nope").await,
             Err(UserError::InvalidCredentials)
         ));
         assert!(matches!(
-            svc.login("ghost", "Str0ng-pass!").await,
+            svc.login("k:t3", "ghost", "Str0ng-pass!").await,
             Err(UserError::InvalidCredentials)
         ));
     }
@@ -864,5 +936,78 @@ mod tests {
             .find(|c: char| c == '"' || c == '&' || c.is_whitespace())
             .unwrap_or(rest.len());
         rest[..end].to_string()
+    }
+
+    #[tokio::test]
+    async fn login_failure_counts_toward_lockout_and_success_resets() {
+        let guard = Arc::new(CountingGuard::new(3));
+        let svc = UserService::new(
+            Arc::new(TestRepository::new()),
+            Arc::new(TestRefreshRepository::new()),
+            Arc::new(TestVerificationRepository::new()),
+            Arc::new(TestMailSender::default()) as Arc<dyn MailSender>,
+            guard.clone() as Arc<dyn LoginGuard>,
+            "http://localhost:8080".to_string(),
+        );
+        svc.register("kate", "kate@example.com", "Str0ng-pass!").await.unwrap();
+
+        // 两次失败 → 计数 2，未锁
+        assert!(svc.login("ip:1.2.3.4:kate", "kate", "wrong1").await.is_err());
+        assert!(svc.login("ip:1.2.3.4:kate", "kate", "wrong2").await.is_err());
+        assert_eq!(guard.failures("ip:1.2.3.4:kate"), 2);
+
+        // 成功 → 清零
+        svc.login("ip:1.2.3.4:kate", "kate", "Str0ng-pass!").await.unwrap();
+        assert_eq!(guard.failures("ip:1.2.3.4:kate"), 0);
+    }
+
+    #[tokio::test]
+    async fn locked_account_rejects_before_password_check() {
+        let guard = Arc::new(CountingGuard::new(2));
+        let svc = UserService::new(
+            Arc::new(TestRepository::new()),
+            Arc::new(TestRefreshRepository::new()),
+            Arc::new(TestVerificationRepository::new()),
+            Arc::new(TestMailSender::default()) as Arc<dyn MailSender>,
+            guard.clone() as Arc<dyn LoginGuard>,
+            "http://localhost:8080".to_string(),
+        );
+        svc.register("liam", "liam@example.com", "Str0ng-pass!").await.unwrap();
+
+        svc.login("k:liam", "liam", "bad").await.unwrap_err();
+        svc.login("k:liam", "liam", "bad").await.unwrap_err();
+
+        // 锁定后：即使密码正确也拒绝 TooManyAttempts（不是 InvalidCredentials）
+        assert!(matches!(
+            svc.login("k:liam", "liam", "Str0ng-pass!").await,
+            Err(UserError::TooManyAttempts)
+        ));
+
+        // 其他 (ip,login) 键不受影响
+        assert!(svc.login("k:other", "liam", "Str0ng-pass!").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unknown_user_also_counts_as_failure() {
+        let guard = Arc::new(CountingGuard::new(1));
+        let svc = UserService::new(
+            Arc::new(TestRepository::new()),
+            Arc::new(TestRefreshRepository::new()),
+            Arc::new(TestVerificationRepository::new()),
+            Arc::new(TestMailSender::default()) as Arc<dyn MailSender>,
+            guard.clone() as Arc<dyn LoginGuard>,
+            "http://localhost:8080".to_string(),
+        );
+
+        // 用户不存在：内部按 InvalidCredentials 对外，但计入限流
+        assert!(matches!(
+            svc.login("k:ghost", "ghost", "whatever").await,
+            Err(UserError::InvalidCredentials)
+        ));
+        assert_eq!(guard.failures("k:ghost"), 1);
+        assert!(matches!(
+            svc.login("k:ghost", "ghost", "whatever").await,
+            Err(UserError::TooManyAttempts)
+        ));
     }
 }

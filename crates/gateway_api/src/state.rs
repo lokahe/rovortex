@@ -10,6 +10,8 @@ use rovortex_users::{TokenSigner, UserService};
 use sqlx::PgPool;
 use storage_pg::{PgEmailVerificationRepository, PgRefreshTokenRepository, PgUserRepository};
 
+use crate::rate_limit::InMemoryLoginGuard;
+
 /// 运行配置：全部来自环境变量。
 struct Config {
     dsn: String,
@@ -69,6 +71,7 @@ impl AppState {
                 refresh_repo,
                 email_verif_repo,
                 mail,
+                Arc::new(InMemoryLoginGuard::new()),
                 config.verify_url_base,
             )),
             tokens: Arc::new(TokenSigner::new(&config.jwt_secret)),
