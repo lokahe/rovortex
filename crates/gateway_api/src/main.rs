@@ -4,6 +4,7 @@
 //! 所有业务规则位于 `rovortex-users` 等业务模块。
 
 mod error;
+mod observe;
 mod rate_limit;
 mod routes;
 mod state;
@@ -25,7 +26,9 @@ async fn main() {
 
     // 组合根：在这里注入具体仓储实现（当前为 PostgreSQL，含启动时迁移）。
     let state = AppState::new().await;
-    let app = routes::router(state);
+    let app = routes::router(state).layer(axum::middleware::from_fn(
+        observe::request_id_and_log,
+    ));
 
     let port: u16 = std::env::var("ROVORTEX_PORT")
         .ok()
