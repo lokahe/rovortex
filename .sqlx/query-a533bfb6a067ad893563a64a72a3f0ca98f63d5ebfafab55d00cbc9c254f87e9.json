@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"count!: i64\" FROM users\n                   WHERE ($1::text IS NULL OR email_key LIKE $1 OR username_key LIKE $1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a533bfb6a067ad893563a64a72a3f0ca98f63d5ebfafab55d00cbc9c254f87e9"
+}

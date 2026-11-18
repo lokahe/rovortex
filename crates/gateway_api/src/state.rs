@@ -23,6 +23,8 @@ struct Config {
     oauth_github: Option<(String, String)>,
     /// 验证邮件里确认链接的前缀。
     verify_url_base: String,
+    /// 逗号分隔的管理员邮箱名单；启动时对已有账号提升 is_admin。
+    admin_emails: Vec<String>,
 }
 
 impl Config {
@@ -48,6 +50,9 @@ impl Config {
             },
             verify_url_base: std::env::var("ROVORTEX_VERIFY_URL_BASE")
                 .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+            admin_emails: std::env::var("ROVORTEX_ADMIN_EMAILS")
+                .map(|s| s.split(',').map(str::to_string).collect())
+                .unwrap_or_default(),
         }
     }
 }
@@ -80,17 +85,26 @@ impl AppState {
             None => Arc::new(LogMailSender),
         };
 
+        let users_service = Arc::new(UserService::new(
+            repo.clone(),
+            refresh_repo,
+            email_verif_repo,
+            mail,
+            Arc::new(InMemoryLoginGuard::new()),
+            audit_repo,
+            identity_repo,
+            config.verify_url_base,
+        ));
+
+        // 首个 admin 的唯一入口：启动时按邮箱名单提升（幂等，账号不存在则下次启动再试）。
+        if !config.admin_emails.is_empty() {
+            if let Err(e) = users_service.promote_admins(&config.admin_emails).await {
+                tracing::warn!("admin promotion failed: {e}");
+            }
+        }
+
         Self {
-            users: Arc::new(UserService::new(
-                repo,
-                refresh_repo,
-                email_verif_repo,
-                mail,
-                Arc::new(InMemoryLoginGuard::new()),
-                audit_repo,
-                identity_repo,
-                config.verify_url_base,
-            )),
+            users: users_service,
             tokens: Arc::new(TokenSigner::new(&config.jwt_secret)),
             metrics: Arc::new(crate::metrics::Metrics::new()),
             oauth_github: config.oauth_github.map(|(client_id, client_secret)| {

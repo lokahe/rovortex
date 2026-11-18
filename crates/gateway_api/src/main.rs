@@ -28,9 +28,12 @@ async fn main() {
 
     // 组合根：在这里注入具体仓储实现（当前为 PostgreSQL，含启动时迁移）。
     let state = AppState::new().await;
-    let app = routes::router(state.clone()).layer(
-        axum::middleware::from_fn_with_state(state.clone(), observe::request_id_and_log),
-    );
+    let app = routes::router(state.clone())
+        .layer(cors_layer())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            observe::request_id_and_log,
+        ));
 
     let port: u16 = std::env::var("ROVORTEX_PORT")
         .ok()
@@ -59,4 +62,38 @@ async fn shutdown_signal() {
         .await
         .expect("failed to install Ctrl-C handler");
     tracing::info!("shutdown signal received, draining connections...");
+}
+
+/// CORS：允许名单来自 ROVORTEX_CORS_ORIGINS（逗号分隔）；
+/// 未配置时不放行任何跨域（API 由同源 App/页面消费，默认最严）。
+/// 浏览器 admin 前端（如 admin.lokahe.top）配好后即可直调。
+fn cors_layer() -> tower_http::cors::CorsLayer {
+    use axum::http::HeaderValue;
+
+    let origins: Vec<HeaderValue> = std::env::var("ROVORTEX_CORS_ORIGINS")
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .filter_map(|o| o.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if origins.is_empty() {
+        tower_http::cors::CorsLayer::new()
+    } else {
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::CONTENT_TYPE,
+            ])
+    }
 }

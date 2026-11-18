@@ -16,6 +16,10 @@ pub struct User {
     pub password_hash: Option<String>,
     /// 邮箱是否已通过验证信确认。
     pub email_verified: bool,
+    /// 管理员标记（admin API 授权依据）。
+    pub is_admin: bool,
+    /// 账号状态：0=正常，1=封禁（users.status SMALLINT）。
+    pub status: i16,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -57,6 +61,9 @@ pub enum UserError {
 
     #[error("too many attempts, try again later")]
     TooManyAttempts,
+
+    #[error("account is banned")]
+    AccountBanned,
 
     #[error("password hashing error: {0}")]
     Hashing(String),

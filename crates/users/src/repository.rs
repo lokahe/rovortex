@@ -47,4 +47,30 @@ pub trait UserRepository: Send + Sync {
     /// 更新邮箱（改邮箱确认后调用）。实现必须同时置 email_verified = true
     /// 并更新 updated_at；邮箱冲突由数据库唯一索引兜底。
     async fn update_email(&self, id: uuid::Uuid, new_email: &str) -> Result<(), UserError>;
+
+    /// 查询用户是否为管理员（admin API 每请求实时校验，撤销立即生效）。
+    async fn is_admin(&self, id: uuid::Uuid) -> Result<bool, UserError>;
+
+    /// 分页列出用户（admin 用户管理）。`q` 非空时按用户名/邮箱前缀匹配。
+    async fn list_users(
+        &self,
+        q: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<User>, UserError>;
+
+    /// 统计用户总数（与 list_users 相同的过滤条件，用于分页）。
+    async fn count_users(&self, q: Option<&str>) -> Result<i64, UserError>;
+
+    /// 设置用户状态（admin 封禁/解封）。实现方需同步更新 updated_at。
+    async fn set_status(&self, id: uuid::Uuid, status: i16) -> Result<(), UserError>;
+
+    /// 置为管理员（启动时 ROVORTEX_ADMIN_EMAILS 提升首个 admin）。
+    async fn promote_admin(&self, id: uuid::Uuid) -> Result<(), UserError>;
+
+    /// 统计各审计动作的发生次数（admin 仪表盘）。
+    async fn count_audit_by_action(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(String, i64)>, UserError>;
 }
