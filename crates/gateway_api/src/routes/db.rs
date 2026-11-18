@@ -77,9 +77,24 @@ pub struct BrowseResponse {
 pub struct BrowseQuery {
     pub page: Option<u32>,
     pub per_page: Option<u32>,
+    /// 排序列名；必须在表的白名单列内（防注入）。
+    pub sort: Option<String>,
+    /// "asc"（默认）| "desc"。
+    pub order: Option<String>,
+    /// 全字段模糊搜索（ILIKE %q%），空串或 None 不过滤。
+    pub q: Option<String>,
 }
 
-/// GET /api/admin/db/tables/{table}?page=&per_page= —— 分页浏览表内容。
+/// 校验排序列确实属于这张表，杜绝 ORDER BY 注入。
+fn resolve_sort_column(sort: &str, valid: &[ColumnInfo]) -> Result<String, ApiError> {
+    valid
+        .iter()
+        .find(|c| c.name == sort)
+        .map(|c| c.name.clone())
+        .ok_or_else(|| ApiError::bad_request(format!("unknown column: {sort}")))
+}
+
+/// GET /api/admin/db/tables/{table}?page=&per_page=&sort=&order=&q= —— 分页浏览表内容。
 pub async fn browse(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -106,27 +121,77 @@ pub async fn browse(
     .await
     .map_err(|e| ApiError::internal(format!("describe {table} failed: {e}")))?;
 
-    // to_jsonb 一行打成对象，免为每张表写一份 row 映射。
-    let raw_rows: Vec<Value> = sqlx::query(&format!(
-        r#"SELECT to_jsonb(t) AS row FROM {table} t ORDER BY created_at DESC LIMIT $1 OFFSET $2"#
-    ))
-    .bind(limit)
-    .bind(offset)
-    .map(|row: PgRow| row.get::<Value, _>("row"))
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| ApiError::internal(format!("browse {table} failed: {e}")))?;
+    // 排序：默认 created_at DESC；显式指定时校验列名后拼接（标识符不能走绑定参数）。
+    let (sort_col, order_sql) = match query.sort.as_deref() {
+        Some(s) => {
+            let col = resolve_sort_column(s, &columns)?;
+            let dir = match query.order.as_deref() {
+                Some("desc") => "DESC",
+                _ => "ASC",
+            };
+            (col, dir)
+        }
+        // 无指定时回退到 created_at DESC；没有该列（不存在于本项目表）则 id ASC。
+        None => {
+            let col = columns
+                .iter()
+                .find(|c| c.name == "created_at")
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "id".to_string());
+            (col, "DESC")
+        }
+    };
 
-    let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+    let search = query.q.as_deref().unwrap_or("").trim().to_string();
+
+    // to_jsonb 一行打成对象，免为每张表写一份 row 映射。
+    // sort_col/where_clause 已过白名单或为固定片段，非用户原文。
+    // 占位符按有无 WHERE 分支生成：搜索时 $1=q/$2=limit/$3=offset，否则 $1=limit/$2=offset。
+    let raw_rows: Vec<Value> = if search.is_empty() {
+        let sql = format!(
+            r#"SELECT to_jsonb(t) AS row FROM {table} t ORDER BY {sort_col} {order_sql} LIMIT $1 OFFSET $2"#
+        );
+        sqlx::query(&sql)
+            .bind(limit)
+            .bind(offset)
+            .map(|row: PgRow| row.get::<Value, _>("row"))
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| ApiError::internal(format!("browse {table} failed: {e}")))?
+    } else {
+        let sql = format!(
+            r#"SELECT to_jsonb(t) AS row FROM {table} t WHERE t::text ILIKE '%' || $1 || '%' ORDER BY {sort_col} {order_sql} LIMIT $2 OFFSET $3"#
+        );
+        sqlx::query(&sql)
+            .bind(&search)
+            .bind(limit)
+            .bind(offset)
+            .map(|row: PgRow| row.get::<Value, _>("row"))
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| ApiError::internal(format!("browse {table} failed: {e}")))?
+    };
+
+    let filtered_total: i64 = if search.is_empty() {
+        sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| ApiError::internal(format!("count {table} failed: {e}")))?
+    } else {
+        sqlx::query_scalar(&format!(
+            r#"SELECT COUNT(*) FROM {table} t WHERE t::text ILIKE '%' || $1 || '%'"#
+        ))
+        .bind(&search)
         .fetch_one(&state.db)
         .await
-        .map_err(|e| ApiError::internal(format!("count {table} failed: {e}")))?;
+        .map_err(|e| ApiError::internal(format!("count {table} failed: {e}")))?
+    };
 
     Ok(Json(BrowseResponse {
         table: table.to_string(),
         columns,
         rows: mask_rows(raw_rows),
-        total,
+        total: filtered_total,
         page,
         per_page,
     }))
