@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use infra_mail::ResendSender;
-use rovortex_users::{TokenSigner, UserService};
+use rovortex_users::{DbBrowser, TokenSigner, UserService};
 use sqlx::PgPool;
-use storage_pg::{PgAuditRepository, PgEmailVerificationRepository, PgOauthIdentityRepository, PgRefreshTokenRepository, PgUserRepository};
+use storage_pg::{PgAuditRepository, PgDbBrowser, PgEmailVerificationRepository, PgOauthIdentityRepository, PgRefreshTokenRepository, PgUserRepository};
 
 use crate::rate_limit::InMemoryLoginGuard;
 
@@ -66,8 +66,8 @@ pub struct AppState {
     pub metrics: Arc<crate::metrics::Metrics>,
     /// GitHub OAuth 凭据；None = 未配置，路由返回 404。
     pub oauth_github: Option<crate::routes::oauth::GithubOAuthConfig>,
-    /// 共享连接池（admin 数据库浏览等只读旁路使用）。
-    pub db: PgPool,
+    /// 管理端数据库浏览（只读旁路的业务层抽象，不再暴露裸连接池）。
+    pub db_browser: Arc<dyn DbBrowser>,
 }
 
 impl AppState {
@@ -114,7 +114,7 @@ impl AppState {
                     client_secret,
                 }
             }),
-            db: pool,
+            db_browser: Arc::new(PgDbBrowser::from_pool(pool)),
         }
     }
 }

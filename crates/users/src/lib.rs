@@ -12,6 +12,7 @@
 
 pub mod audit;
 pub mod auth;
+pub mod db_browse;
 pub mod domain;
 pub mod email_verification;
 pub mod mail;
@@ -24,6 +25,9 @@ pub mod service;
 
 pub use audit::{AuditAction, AuditEntry, AuditRepository, NewAuditLog};
 pub use auth::TokenSigner;
+pub use db_browse::{
+    BrowseParams, ColumnInfo, DbBrowseError, DbBrowser, TableSummary, mask_rows,
+};
 pub use domain::{NewUser, User, UserError};
 pub use email_verification::{
     EmailVerificationRepository, NewEmailVerification, VerificationPurpose,
