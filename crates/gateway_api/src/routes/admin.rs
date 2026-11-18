@@ -6,7 +6,6 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use chrono::{DateTime, Utc};
-use rovortex_users::UserError;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

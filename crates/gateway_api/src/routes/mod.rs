@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod db;
 pub mod health;
 pub mod magic;
 pub mod metrics;
@@ -32,6 +33,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/users/{id}", get(admin::user_detail))
         .route("/api/admin/users/{id}/ban", put(admin::set_ban))
         .route("/api/admin/stats", get(admin::stats))
+        .route("/api/admin/db/tables", get(db::list_tables))
+        .route("/api/admin/db/tables/{table}", get(db::browse))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_admin,

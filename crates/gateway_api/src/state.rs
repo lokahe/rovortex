@@ -66,6 +66,8 @@ pub struct AppState {
     pub metrics: Arc<crate::metrics::Metrics>,
     /// GitHub OAuth 凭据；None = 未配置，路由返回 404。
     pub oauth_github: Option<crate::routes::oauth::GithubOAuthConfig>,
+    /// 共享连接池（admin 数据库浏览等只读旁路使用）。
+    pub db: PgPool,
 }
 
 impl AppState {
@@ -73,11 +75,10 @@ impl AppState {
         let config = Config::from_env();
         let pool = prepare_pool(&config.dsn).await;
 
-        let repo = Arc::new(PgUserRepository::from_pool(pool.clone()));
-        let refresh_repo = Arc::new(PgRefreshTokenRepository::from_pool(pool.clone()));
+        let repo = Arc::new(PgUserRepository::from_pool(pool.clone()));        let refresh_repo = Arc::new(PgRefreshTokenRepository::from_pool(pool.clone()));
         let email_verif_repo = Arc::new(PgEmailVerificationRepository::from_pool(pool.clone()));
         let audit_repo = Arc::new(PgAuditRepository::from_pool(pool.clone()));
-        let identity_repo = Arc::new(PgOauthIdentityRepository::from_pool(pool));
+        let identity_repo = Arc::new(PgOauthIdentityRepository::from_pool(pool.clone()));
 
         // 邮件发送：有 RESEND_API_KEY 用 Resend；没有则退化为日志（本地开发）。
         let mail: Arc<dyn rovortex_users::MailSender> = match &config.resend_api_key {
@@ -113,6 +114,7 @@ impl AppState {
                     client_secret,
                 }
             }),
+            db: pool,
         }
     }
 }
