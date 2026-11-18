@@ -55,4 +55,20 @@ pub struct NewAuditLog {
 pub trait AuditRepository: Send + Sync {
     /// 写入失败不应影响主流程：实现方需吞掉并只记日志。
     async fn append(&self, entry: NewAuditLog) -> Result<(), crate::domain::UserError>;
+
+    /// 按用户读最近审计记录（admin 详情页），新→旧排列。
+    async fn list_for_user(
+        &self,
+        user_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<AuditEntry>, crate::domain::UserError>;
+}
+
+/// 审计读取视图：动作的稳定字符串形式 + 上下文。
+#[derive(Debug, Clone)]
+pub struct AuditEntry {
+    pub action: String,
+    pub detail: String,
+    pub client_ip: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }

@@ -138,6 +138,7 @@ curl -X POST http://localhost:8080/api/auth/magic-link `
 | `/api/auth/magic-link` · `/verify` | POST / GET | Magic Link 登录 |
 | `/api/users/me` | GET | 当前用户（Bearer JWT） |
 | `/api/users/me/password` · `/me/email` | PUT | 改密码 / 改邮箱 |
+| `/api/admin/users` · `/users/{id}` · `/users/{id}/ban` · `/stats` | GET/PUT | 管理接口（is_admin 实时校验） |
 | `/health` · `/metrics` | GET | 健康检查 / Prometheus 指标 |
 
 错误响应统一为 `{"error":{"code":"...","message":"..."}}`：

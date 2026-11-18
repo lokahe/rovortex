@@ -20,6 +20,8 @@ use crate::repository::UserRepository;
 
 const REFRESH_TTL_DAYS: i64 = 30;
 const EMAIL_VERIFICATION_TTL_MINS: i64 = 15;
+/// users.status 的封禁值（与 gateway_api admin 路由的 STATUS_BANNED 一致）。
+pub const BANNED_STATUS: i16 = 1;
 
 /// 一次登录/刷新产出的完整会话：领域层不关心 JWT 细节，
 /// access token 由表现层用 TokenSigner 另行签发。
@@ -75,6 +77,45 @@ impl UserService {
     /// 暴露仓储给表现层做按 id 的资料读取（受鉴权保护）。
     pub fn repository(&self) -> Arc<dyn UserRepository> {
         Arc::clone(&self.repo)
+    }
+
+    /// 暴露外部身份仓储（admin 详情页读取；仅 admin 路由可达）。
+    pub fn identities(&self) -> Arc<dyn OauthIdentityRepository> {
+        Arc::clone(&self.identities)
+    }
+
+    /// 读取单用户最近审计记录（admin 详情页）。
+    pub async fn audit_logs_for_user(
+        &self,
+        user_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<crate::audit::AuditEntry>, UserError> {
+        self.audit.list_for_user(user_id, limit).await
+    }
+
+    /// 吊销用户全部会话（admin 封禁时调用），返回吊销数量。
+    pub async fn revoke_sessions_for(&self, user_id: Uuid) -> Result<u64, UserError> {
+        self.refresh.revoke_all_for_user(user_id).await
+    }
+
+    /// 启动时提升管理员：ROVORTEX_ADMIN_EMAILS 中的邮箱（大小写不敏感）
+    /// 若已有账号则置 is_admin = true。仅组合根调用，无 HTTP 入口。
+    pub async fn promote_admins(&self, emails: &[String]) -> Result<(), UserError> {
+        for email in emails {
+            let email = email.trim();
+            if email.is_empty() {
+                continue;
+            }
+            if let Some(user) = self.repo.find_by_email(email).await? {
+                if !user.is_admin {
+                    self.repo.promote_admin(user.id).await?;
+                    tracing::info!(email = %user.email, user_id = %user.id, "promoted to admin");
+                }
+            } else {
+                tracing::warn!(email, "admin email not found among users; will promote on next boot after the account exists");
+            }
+        }
+        Ok(())
     }
 
     /// 注册：校验 → 查重 → Argon2id 哈希 → 持久化 → 签发会话。
@@ -400,8 +441,12 @@ impl UserService {
         Ok(())
     }
 
-    /// 签发会话：生成 refresh token，哈希落库。
+    /// 签发会话：封禁检查 → 生成 refresh token，哈希落库。
+    /// 三种登录路径（密码/OAuth/Magic）共用此收口，封禁即刻生效。
     async fn issue_session(&self, user: User) -> Result<Session, UserError> {
+        if user.status == BANNED_STATUS {
+            return Err(UserError::AccountBanned);
+        }
         let raw = generate_refresh_token();
         let expires_at = chrono::Utc::now() + chrono::Duration::days(REFRESH_TTL_DAYS);
         self.refresh
@@ -732,6 +777,8 @@ mod tests {
                 email: new_user.email,
                 password_hash: new_user.password_hash,
                 email_verified: false,
+                is_admin: false,
+                status: 0,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             };
@@ -821,6 +868,49 @@ mod tests {
                 .unwrap()
                 .insert(email_key, id);
             Ok(())
+        }
+
+        async fn is_admin(&self, id: Uuid) -> Result<bool, UserError> {
+            Ok(self
+                .store
+                .lock()
+                .unwrap()
+                .get(&id)
+                .is_some_and(|u| u.is_admin))
+        }
+
+        async fn list_users(
+            &self,
+            _q: Option<&str>,
+            _limit: i64,
+            _offset: i64,
+        ) -> Result<Vec<User>, UserError> {
+            Ok(self.store.lock().unwrap().values().cloned().collect())
+        }
+
+        async fn count_users(&self, _q: Option<&str>) -> Result<i64, UserError> {
+            Ok(self.store.lock().unwrap().len() as i64)
+        }
+
+        async fn set_status(&self, id: Uuid, _status: i16) -> Result<(), UserError> {
+            let mut store = self.store.lock().unwrap();
+            let _user = store.get_mut(&id).ok_or(UserError::UserNotFound)?;
+            Ok(())
+        }
+
+        async fn promote_admin(&self, id: Uuid) -> Result<(), UserError> {
+            let mut store = self.store.lock().unwrap();
+            let user = store.get_mut(&id).ok_or(UserError::UserNotFound)?;
+            user.is_admin = true;
+            user.updated_at = Utc::now();
+            Ok(())
+        }
+
+        async fn count_audit_by_action(
+            &self,
+            _since: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<(String, i64)>, UserError> {
+            Ok(Vec::new())
         }
     }
 
@@ -960,6 +1050,14 @@ mod tests {
         async fn append(&self, entry: NewAuditLog) -> Result<(), UserError> {
             self.events.lock().unwrap().push((entry.user_id, entry.action));
             Ok(())
+        }
+
+        async fn list_for_user(
+            &self,
+            _user_id: Uuid,
+            _limit: i64,
+        ) -> Result<Vec<crate::audit::AuditEntry>, UserError> {
+            Ok(Vec::new())
         }
     }
 

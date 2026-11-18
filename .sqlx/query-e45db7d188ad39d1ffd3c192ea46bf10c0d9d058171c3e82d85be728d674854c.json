@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, created_at, updated_at\n               FROM users WHERE email_key = $1",
+  "query": "INSERT INTO users (id, username, email, password_hash)\n               VALUES ($1, $2, $3, $4)\n               RETURNING id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, created_at, updated_at",
   "describe": {
     "columns": [
       {
@@ -45,17 +45,25 @@
       },
       {
         "ordinal": 8,
+        "name": "is_admin",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 9,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
+        "Uuid",
+        "Text",
+        "Text",
         "Text"
       ]
     },
@@ -69,8 +77,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "bd076a81ced51cf4df1e1307ee157d3a545f30d82a3e789ce0e0c3fd5115fd3b"
+  "hash": "e45db7d188ad39d1ffd3c192ea46bf10c0d9d058171c3e82d85be728d674854c"
 }

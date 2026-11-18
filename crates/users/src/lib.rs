@@ -22,7 +22,7 @@ pub mod refresh_token;
 pub mod repository;
 pub mod service;
 
-pub use audit::{AuditAction, AuditRepository, NewAuditLog};
+pub use audit::{AuditAction, AuditEntry, AuditRepository, NewAuditLog};
 pub use auth::TokenSigner;
 pub use domain::{NewUser, User, UserError};
 pub use email_verification::{
@@ -33,4 +33,4 @@ pub use oauth_identity::{ExternalIdentity, NewExternalIdentity, OauthIdentityRep
 pub use rate_limit::{LoginGuard, guard_key};
 pub use refresh_token::{NewRefreshToken, RefreshTokenRepository};
 pub use repository::UserRepository;
-pub use service::UserService;
+pub use service::{BANNED_STATUS, UserService};
