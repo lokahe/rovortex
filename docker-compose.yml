@@ -20,6 +20,12 @@ services:
       dockerfile: crates/gateway_api/Dockerfile
     environment:
       ROVORTEX_DB_URL: postgres://rovortex:${DB_PASSWORD}@pg:5432/rovortex
+      ROVORTEX_JWT_SECRET: ${ROVORTEX_JWT_SECRET}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      ROVORTEX_MAIL_FROM: ${ROVORTEX_MAIL_FROM:-onboarding@resend.dev}
+      ROVORTEX_VERIFY_URL_BASE: ${ROVORTEX_VERIFY_URL_BASE:-http://localhost:8080}
+      OAUTH_GITHUB_CLIENT_ID: ${OAUTH_GITHUB_CLIENT_ID:-}
+      OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
       RUST_LOG: info
     ports:
       - "8080:8080"

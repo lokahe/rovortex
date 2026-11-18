@@ -30,4 +30,21 @@ pub trait UserRepository: Send + Sync {
 
     /// 按登录名（用户名 **或** 邮箱）查找，登录场景专用。
     async fn find_by_login(&self, login: &str) -> Result<Option<User>, UserError>;
+
+    /// 按唯一 id 查找（鉴权后的资料读取等场景）。
+    async fn find_by_id(&self, id: uuid::Uuid) -> Result<Option<User>, UserError>;
+
+    /// 更新密码哈希（改密码）。调用方保证已完成旧密码校验。
+    async fn update_password_hash(
+        &self,
+        id: uuid::Uuid,
+        new_hash: &str,
+    ) -> Result<(), UserError>;
+
+    /// 标记邮箱已验证（注册验证信确认后）。
+    async fn mark_email_verified(&self, id: uuid::Uuid) -> Result<(), UserError>;
+
+    /// 更新邮箱（改邮箱确认后调用）。实现必须同时置 email_verified = true
+    /// 并更新 updated_at；邮箱冲突由数据库唯一索引兜底。
+    async fn update_email(&self, id: uuid::Uuid, new_email: &str) -> Result<(), UserError>;
 }

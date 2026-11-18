@@ -6,14 +6,16 @@ use uuid::Uuid;
 
 /// 用户实体。
 ///
-/// `password_hash` 为 PHC 格式的 Argon2id 串，本实体禁止对外的 serde 序列化，
-/// 对外暴露一律走表现层的 DTO，防止敏感字段意外泄漏。
+/// `password_hash` 为 PHC 格式的 Argon2id 串；`None` = 无密码（纯 OAuth/Magic 用户）。
+/// 本实体禁止对外的 serde 序列化，对外暴露一律走表现层的 DTO，防止敏感字段意外泄漏。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     pub id: Uuid,
     pub username: String,
     pub email: String,
-    pub password_hash: String,
+    pub password_hash: Option<String>,
+    /// 邮箱是否已通过验证信确认。
+    pub email_verified: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -23,7 +25,7 @@ pub struct User {
 pub struct NewUser {
     pub username: String,
     pub email: String,
-    pub password_hash: String,
+    pub password_hash: Option<String>,
 }
 
 /// 领域错误 —— 表现层负责映射为 HTTP 状态码。
@@ -49,6 +51,12 @@ pub enum UserError {
 
     #[error("invalid credentials")]
     InvalidCredentials,
+
+    #[error("refresh token is invalid or expired")]
+    InvalidRefreshToken,
+
+    #[error("too many attempts, try again later")]
+    TooManyAttempts,
 
     #[error("password hashing error: {0}")]
     Hashing(String),

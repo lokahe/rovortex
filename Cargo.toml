@@ -4,6 +4,7 @@ members = [
     "crates/users",
     "crates/gateway_api",
     "crates/storage_pg",
+    "crates/infra_mail",
 ]
 
 [workspace.package]
@@ -22,6 +23,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 # ---- 序列化 ----
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
+sha2 = "0.10"
 
 # ---- 通用 ----
 uuid = { version = "1", features = ["v7", "serde"] }
@@ -33,10 +36,14 @@ async-trait = "0.1"
 argon2 = "0.5"
 # getrandom feature：提供 SaltString::generate 所需的 OsRng
 rand_core = { version = "0.6", features = ["getrandom"] }
+jsonwebtoken = "9"
 
 # ---- 可观测性 ----
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ---- HTTP 客户端（OAuth provider 交互）----
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [profile.release]
 lto = "thin"

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, username, username_key, email, email_key, password_hash, status, created_at, updated_at\n               FROM users WHERE username_key = $1 OR email_key = $1",
+  "query": "SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, created_at, updated_at\n               FROM users WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -40,18 +40,23 @@
       },
       {
         "ordinal": 7,
+        "name": "email_verified",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -60,11 +65,12 @@
       false,
       false,
       false,
+      true,
       false,
       false,
       false,
       false
     ]
   },
-  "hash": "b6e4c1d9a9edbdcaa0b65f816796e005c9648633ff3f5056ed2192c43110672a"
+  "hash": "211f4c31d5b5564cd615d7a4c77c4cb964b1787db6695e09df76b51918c7405c"
 }

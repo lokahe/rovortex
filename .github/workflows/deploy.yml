@@ -3,6 +3,8 @@ name: deploy
 on:
   push:
     branches: [master]
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 jobs:
@@ -11,6 +13,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # PR（含 fork）只跑测试；push master / 手动触发才构建部署。
+    # 分支保护要求 test-build-deploy check 在 PR 上出现，workflow 缺 pull_request 触发时 PR 永远 blocked。
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.event.repository.id
     steps:
       - uses: actions/checkout@v4
 
@@ -19,9 +24,11 @@ jobs:
 
       - name: Set image tag
         id: tag
+        if: github.event_name != 'pull_request'
         run: echo "sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -29,6 +36,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push image
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -39,6 +47,7 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/rovortex-api:${{ steps.tag.outputs.sha }}
 
       - name: Deploy to cloud-01
+        if: github.event_name != 'pull_request'
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}

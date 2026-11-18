@@ -103,12 +103,46 @@ docker images    # 确认 rovortex-rovortex:latest、postgres:16-alpine
 
 ```bash
 printf 'DB_PASSWORD=你的强密码\n' > .env
+printf 'ROVORTEX_JWT_SECRET=强随机值(openssl rand -base64 48)\n' >> .env
+printf 'RESEND_API_KEY=re_xxx\n' >> .env            # 可选：不发邮件可留空（退化为日志）
+printf 'ROVORTEX_MAIL_FROM=onboarding@resend.dev\n' >> .env
+printf 'ROVORTEX_VERIFY_URL_BASE=https://api.lokahe.top:8443\n' >> .env
 chmod 600 .env
 ```
 
 - compose 里 `ROVORTEX_DB_URL: postgres://rovortex:${DB_PASSWORD}@pg:5432/rovortex` 自动注入
 - PG 容器**首次启动**用它初始化密码；之后改密码须进库 ALTER USER，光改 .env 无效
 - 服务器上**不要**有 docker-compose.override.yml（会把 5432 暴露公网）
+- `RESEND_API_KEY` 留空时验证邮件只打日志（本地开发模式）；测试模式 key 只能发给 Resend 账号本人邮箱，任意收件人需验证自有域名
+
+### 第 6.5 步：TLS 反代（Caddy，已配置）
+
+443/tcp+udp 被 sing-box（VLESS+Reality / Hysteria2）占用，**不可让出**。
+Caddy 因此监听非常规端口：
+
+- `https://api.lokahe.top:8443` → 反代 `localhost:8080`（对外 API 入口）
+- `http://api.lokahe.top:80` 仅用于 ACME http-01 证书签发（Let's Encrypt 默认验证端口）
+
+Caddyfile `/etc/caddy/Caddyfile`：
+
+```caddyfile
+{
+	https_port 8443
+}
+
+api.lokahe.top:8443 {
+	reverse_proxy localhost:8080
+}
+
+http://api.lokahe.top {
+	reverse_proxy localhost:8080
+}
+```
+
+要点：
+- `https_port 8443` 必须放在全局块，否则 ACME 重定向仍指向 443 被 sing-box 截走，证书签不下来
+- ufw 需放行 `8443/tcp` 和 `80/tcp`
+- 证书自动续期（Caddy 内置，90 天周期）
 
 ### 第 7 步：启动
 
