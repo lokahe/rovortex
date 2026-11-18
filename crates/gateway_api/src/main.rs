@@ -4,6 +4,7 @@
 //! 所有业务规则位于 `rovortex-users` 等业务模块。
 
 mod error;
+mod mail_rate_limit;
 mod metrics;
 mod observe;
 mod rate_limit;

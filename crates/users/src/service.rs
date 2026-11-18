@@ -549,6 +549,66 @@ impl UserService {
         self.audit(Some(user_id), AuditAction::EmailChanged, format!("new={email}"), client_ip);
         self.repo.update_email(user_id, &email).await
     }
+
+    /// 请求 Magic Link 登录：给邮箱发一次性登录链接（15 分钟有效）。
+    ///
+    /// 防枚举：无论邮箱是否已注册都发信（未注册 = 登录即注册），
+    /// 但对已注册邮箱记审计；恒返回 Ok。
+    /// 发信频率限制由表现层实施（同邮箱 1 分钟 1 条）。
+    pub async fn request_magic_link(&self, email: &str, client_ip: &str) -> Result<(), UserError> {
+        validate_email(email)?;
+        if let Some(user) = self.repo.find_by_email(email).await? {
+            self.audit(
+                Some(user.id),
+                AuditAction::MagicLinkRequested,
+                format!("email={email}"),
+                client_ip,
+            );
+        }
+
+        let raw = generate_refresh_token();
+        self.email_verifications
+            .insert(NewEmailVerification {
+                id: Uuid::now_v7(),
+                email: email.to_string(),
+                token_hash: hash_refresh_token(&raw),
+                purpose: VerificationPurpose::MagicLink,
+                user_id: None,
+                expires_at: chrono::Utc::now()
+                    + chrono::Duration::minutes(EMAIL_VERIFICATION_TTL_MINS),
+            })
+            .await?;
+        let link = format!(
+            "{}/api/auth/magic-link/verify?token={}",
+            self.verify_url_base, raw
+        );
+        let html = magic_link_email_html(email, &link);
+        if let Err(e) = self.mail.send(email, "Rovortex 登录链接", &html).await {
+            tracing::warn!(email, error = %e, "failed to send magic link mail");
+        }
+        Ok(())
+    }
+
+    /// 验证 Magic Link：消费一次性 token → 以 ("magic", email) 身份登录
+    /// （已注册直接登录；未注册自动建号）。返回完整会话。
+    pub async fn verify_magic_link(
+        &self,
+        raw_token: &str,
+        client_ip: &str,
+    ) -> Result<Session, UserError> {
+        let token_hash = hash_refresh_token(raw_token);
+        let (email, purpose, _) = self
+            .email_verifications
+            .consume_by_hash(&token_hash)
+            .await?
+            .ok_or(UserError::InvalidRefreshToken)?;
+        if purpose != VerificationPurpose::MagicLink {
+            return Err(UserError::InvalidRefreshToken);
+        }
+        // 收件权即身份：能读到邮件 = 邮箱主人 = 平台已验证邮箱
+        self.login_with_identity("magic", &email, Some(&email), client_ip)
+            .await
+    }
 }
 
 /// 验证邮件 HTML 模板（注册）。
@@ -572,6 +632,19 @@ fn email_change_email_html(username: &str, new_email: &str, link: &str) -> Strin
   <p>你请求将账号邮箱变更为 <strong>{new_email}</strong>。请点击下面的链接确认（15 分钟内有效）：</p>
   <p><a href="{link}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px">确认变更</a></p>
   <p style="color:#888;font-size:13px">如果你没有发起过此操作，请忽略本邮件，账号邮箱不会变更。</p>
+</div>"#
+    )
+}
+
+/// Magic Link 登录邮件 HTML 模板。
+fn magic_link_email_html(email: &str, link: &str) -> String {
+    format!(
+        r#"<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+  <h2>登录 Rovortex</h2>
+  <p>你好 {email}，请点击下面的链接登录（15 分钟内有效，仅可使用一次）：</p>
+  <p><a href="{link}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px">一键登录</a></p>
+  <p style="color:#888;font-size:13px">如果按钮无法点击，请复制此链接到浏览器：<br><a href="{link}">{link}</a></p>
+  <p style="color:#888;font-size:13px">如果你没有请求登录，请忽略本邮件，任何人没有此链接都无法登录你的账号。</p>
 </div>"#
     )
 }
@@ -1469,5 +1542,67 @@ mod tests {
             svc.set_password(s.user.id, "An0ther-pass!", "5.5.5.5").await,
             Err(UserError::InvalidCredentials)
         ));
+    }
+
+    #[tokio::test]
+    async fn magic_link_new_email_registers_and_existing_logs_in() {
+        let (svc2, sent2) = service_with_mail(TestMailSender::default());
+        svc2.request_magic_link("rory@example.com", "6.6.6.6").await.unwrap();
+        let mails = sent2.sent.lock().unwrap();
+        assert_eq!(mails.len(), 1, "magic link mail sent");
+        assert_eq!(mails[0].0, "rory@example.com");
+        let raw = extract_token_from_html(&mails[0].2);
+        drop(mails);
+
+        // 未注册邮箱 verify → 自动注册（login_with_identity("magic") 路径）
+        let s = svc2.verify_magic_link(&raw, "6.6.6.6").await.unwrap();
+        assert_eq!(s.user.email, "rory@example.com");
+        assert!(s.user.email_verified);
+        assert!(s.user.password_hash.is_none());
+        assert_eq!(s.user.username, "rory");
+
+        // 同邮箱再次请求 + verify → 登录既有账号
+        svc2.request_magic_link("rory@example.com", "6.6.6.6").await.unwrap();
+        let mails = sent2.sent.lock().unwrap();
+        assert_eq!(mails.len(), 2);
+        let raw2 = extract_token_from_html(&mails[1].2);
+        drop(mails);
+        let s2 = svc2.verify_magic_link(&raw2, "6.6.6.6").await.unwrap();
+        assert_eq!(s2.user.id, s.user.id, "existing account logs in");
+    }
+
+    #[tokio::test]
+    async fn magic_link_token_is_single_use_and_cross_purpose_rejected() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+        svc.request_magic_link("sky@example.com", "6.6.6.6").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let raw = extract_token_from_html(&mails[0].2);
+        drop(mails);
+
+        // 一次性：第二次 verify 失败
+        assert!(svc.verify_magic_link(&raw, "6.6.6.6").await.is_ok());
+        assert!(matches!(
+            svc.verify_magic_link(&raw, "6.6.6.6").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
+
+        // 跨用途：signup token 不能当 magic link 用
+        svc.register("tess", "tess@example.com", "Str0ng-pass!", "127.0.0.1").await.unwrap();
+        svc.request_email_verification("tess@example.com", "127.0.0.1").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let signup_raw = extract_token_from_html(&mails[1].2);
+        drop(mails);
+        assert!(matches!(
+            svc.verify_magic_link(&signup_raw, "6.6.6.6").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn magic_link_request_is_always_ok_for_unknown_email() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+        // 未注册邮箱：恒 Ok 且发信（登录即注册语义）
+        svc.request_magic_link("ghost-magic@example.com", "6.6.6.6").await.unwrap();
+        assert_eq!(sent.sent.lock().unwrap().len(), 1);
     }
 }

@@ -13,6 +13,8 @@ pub enum VerificationPurpose {
     Signup,
     /// 改邮箱：向新邮箱发确认信（token 关联 user_id）。
     EmailChange,
+    /// 免密登录：token 即登录凭据（验证后签发会话）。
+    MagicLink,
 }
 
 impl VerificationPurpose {
@@ -20,6 +22,7 @@ impl VerificationPurpose {
         match self {
             VerificationPurpose::Signup => "signup",
             VerificationPurpose::EmailChange => "email_change",
+            VerificationPurpose::MagicLink => "magic_link",
         }
     }
 }

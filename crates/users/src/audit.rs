@@ -19,6 +19,7 @@ pub enum AuditAction {
     EmailVerified,
     EmailChangeRequested,
     EmailChanged,
+    MagicLinkRequested,
 }
 
 impl AuditAction {
@@ -35,6 +36,7 @@ impl AuditAction {
             AuditAction::EmailVerified => "email_verified",
             AuditAction::EmailChangeRequested => "email_change_requested",
             AuditAction::EmailChanged => "email_changed",
+            AuditAction::MagicLinkRequested => "magic_link_requested",
         }
     }
 }

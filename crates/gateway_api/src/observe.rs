@@ -8,7 +8,7 @@ use axum::http::header::HeaderName;
 use axum::http::HeaderValue;
 use axum::middleware::Next;
 use axum::response::Response;
-use tracing::info_span;
+use tracing::{info_span, Instrument};
 
 use crate::state::AppState;
 
@@ -40,29 +40,39 @@ pub async fn request_id_and_log(
         method = %method,
         path = %path,
     );
-    let _guard = span.enter();
-
+    // 用 instrument 而非 enter()：enter 的 guard 跨 await 挂起时，
+    // 恢复后线程局部上下文可能丢失（任务被调度到其他线程），
+    // 导致 await 之后的日志没有 span 字段。instrument 在每次恢复时重挂。
     let start = std::time::Instant::now();
-    let mut response = next.run(req).await;
-    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let mut response = async {
+        let response = next.run(req).await;
+        let elapsed_ms = start.elapsed().as_millis() as u64;
 
-    let status = response.status();
-    tracing::info!(
-        status = status.as_u16(),
-        elapsed_ms,
-        "request completed"
-    );
+        let status = response.status();
+        tracing::info!(
+            status = status.as_u16(),
+            elapsed_ms,
+            "request completed"
+        );
 
-    if track {
-        state
-            .metrics
-            .observe(&route_template(&path), method.as_str(), status.as_u16(), elapsed_ms);
+        // 失败请求在 INFO 日志之上多一行 ERROR，排障时先看到它。
+        if status.is_server_error() {
+            tracing::error!(status = status.as_u16(), "request failed with server error");
+        }
+
+        if track {
+            state.metrics.observe(
+                &route_template(&path),
+                method.as_str(),
+                status.as_u16(),
+                elapsed_ms,
+            );
+        }
+
+        response
     }
-
-    // 失败请求在 INFO 日志之上多一行 ERROR，排障时先看到它。
-    if status.is_server_error() {
-        tracing::error!(status = status.as_u16(), "request failed with server error");
-    }
+    .instrument(span.clone())
+    .await;
 
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert(X_REQUEST_ID, value);

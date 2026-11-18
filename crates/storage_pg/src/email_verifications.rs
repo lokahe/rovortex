@@ -59,6 +59,7 @@ impl EmailVerificationRepository for PgEmailVerificationRepository {
         Ok(row.map(|r| {
             let purpose = match r.purpose.as_str() {
                 "email_change" => VerificationPurpose::EmailChange,
+                "magic_link" => VerificationPurpose::MagicLink,
                 _ => VerificationPurpose::Signup,
             };
             (r.email, purpose, r.user_id)

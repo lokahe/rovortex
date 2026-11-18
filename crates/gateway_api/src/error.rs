@@ -36,6 +36,14 @@ impl ApiError {
     pub fn internal(message: String) -> Self {
         Self::Http(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
     }
+
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self::Http(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            message.into(),
+        )
+    }
 }
 
 impl IntoResponse for ApiError {
