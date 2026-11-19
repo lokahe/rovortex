@@ -690,6 +690,36 @@ impl UserService {
         self.audit(Some(user_id), AuditAction::PasswordChanged, "password_reset", client_ip);
         Ok(())
     }
+
+    /// 修改用户名：校验格式 → 唯一性（大小写不敏感，唯一索引兜底并发）→ 更新。
+    /// 不吊销会话：用户名不参与 token 验证。
+    pub async fn change_username(
+        &self,
+        user_id: Uuid,
+        new_username: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
+        validate_username(new_username)?;
+        let user = self
+            .repo
+            .find_by_id(user_id)
+            .await?
+            .ok_or(UserError::UserNotFound)?;
+        if user.username.eq_ignore_ascii_case(new_username) {
+            return Ok(()); // 没变（或仅大小写变化走唯一性更新）
+        }
+        if self.repo.find_by_username(new_username).await?.is_some() {
+            return Err(UserError::UsernameTaken(new_username.into()));
+        }
+        self.repo.update_username(user_id, new_username).await?;
+        self.audit(
+            Some(user_id),
+            AuditAction::UsernameChanged,
+            format!("old={} new={new_username}", user.username),
+            client_ip,
+        );
+        Ok(())
+    }
 }
 
 /// 验证邮件 HTML 模板（注册）。
@@ -916,6 +946,32 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(email_key, id);
+            Ok(())
+        }
+
+        async fn update_username(&self, id: Uuid, new_username: &str) -> Result<(), UserError> {
+            let username_key = new_username.to_lowercase();
+            if self
+                .username_index
+                .lock()
+                .unwrap()
+                .get(&username_key)
+                .is_some_and(|&existing| existing != id)
+            {
+                return Err(UserError::UsernameTaken(new_username.to_string()));
+            }
+            let mut store = self.store.lock().unwrap();
+            let user = store.get_mut(&id).ok_or(UserError::UserNotFound)?;
+            self.username_index
+                .lock()
+                .unwrap()
+                .remove(&user.username.to_lowercase());
+            user.username = new_username.to_string();
+            user.updated_at = Utc::now();
+            self.username_index
+                .lock()
+                .unwrap()
+                .insert(username_key, id);
             Ok(())
         }
 
@@ -1751,6 +1807,43 @@ mod tests {
         // 未注册邮箱：恒 Ok 且发信（登录即注册语义）
         svc.request_magic_link("ghost-magic@example.com", "6.6.6.6").await.unwrap();
         assert_eq!(sent.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn change_username_validates_takes_and_updates() {
+        let svc = service();
+        let s = svc
+            .register("ursula", "ursula@example.com", "Str0ng-pass!", "9.9.9.9")
+            .await
+            .unwrap();
+
+        // 格式不合法
+        assert!(matches!(
+            svc.change_username(s.user.id, "ab", "9.9.9.9").await,
+            Err(UserError::InvalidUsername(_))
+        ));
+
+        // 与他人冲突
+        let _ = svc
+            .register("victor", "victor@example.com", "Str0ng-pass!", "9.9.9.9")
+            .await
+            .unwrap();
+        assert!(matches!(
+            svc.change_username(s.user.id, "victor", "9.9.9.9").await,
+            Err(UserError::UsernameTaken(_))
+        ));
+
+        // 成功改 + 旧用户名释放
+        svc.change_username(s.user.id, "ursula_2", "9.9.9.9").await.unwrap();
+        let user = svc.repository().find_by_id(s.user.id).await.unwrap().unwrap();
+        assert_eq!(user.username, "ursula_2");
+        assert!(svc.repository().find_by_username("ursula").await.unwrap().is_none());
+
+        // 旧用户名可被他人注册
+        assert!(svc
+            .register("ursula", "ursula-new@example.com", "Str0ng-pass!", "9.9.9.9")
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

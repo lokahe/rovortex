@@ -186,6 +186,18 @@ impl UserRepository for PgUserRepository {
         Ok(())
     }
 
+    async fn update_username(&self, id: Uuid, new_username: &str) -> Result<(), UserError> {
+        sqlx::query!(
+            r#"UPDATE users SET username = $2, updated_at = now() WHERE id = $1"#,
+            id,
+            new_username,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
+        Ok(())
+    }
+
     async fn is_admin(&self, id: Uuid) -> Result<bool, UserError> {
         let row =
             sqlx::query!(r#"SELECT is_admin AS "is_admin: bool" FROM users WHERE id = $1"#, id)

@@ -34,6 +34,11 @@ pub struct ChangeEmailRequest {
     pub new_email: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ChangeUsernameRequest {
+    pub new_username: String,
+}
+
 /// GET /api/users/me —— 200 OK
 pub async fn me(
     State(state): State<AppState>,
@@ -85,4 +90,33 @@ pub async fn change_email(
         .request_email_change(auth.user_id, &req.new_email, &ip)
         .await?;
     Ok(axum::http::StatusCode::ACCEPTED)
+}
+
+/// PUT /api/users/me/username —— 200 OK（返回更新后的资料）
+pub async fn change_username(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ChangeUsernameRequest>,
+) -> Result<Json<MeResponse>, ApiError> {
+    let ip = client_ip(&headers, addr);
+    state
+        .users
+        .change_username(auth.user_id, &req.new_username, &ip)
+        .await?;
+    let user = state
+        .users
+        .repository()
+        .find_by_id(auth.user_id)
+        .await?
+        .ok_or(UserError::UserNotFound)?;
+    Ok(Json(MeResponse {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        email_verified: user.email_verified,
+        created_at: user.created_at,
+        updated_at: user.updated_at,
+    }))
 }

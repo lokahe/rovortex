@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/users/me", get(users_me::me))
         .route("/api/users/me/password", put(users_me::change_password))
         .route("/api/users/me/email", put(users_me::change_email))
+        .route("/api/users/me/username", put(users_me::change_username))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
