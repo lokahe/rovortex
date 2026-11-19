@@ -66,6 +66,8 @@ pub struct AppState {
     pub tokens: Arc<TokenSigner>,
     /// 进程内 HTTP 指标（/metrics 暴露）。
     pub metrics: Arc<crate::metrics::Metrics>,
+    /// 进程内日志环形缓冲（admin 日志页：历史 + SSE 实时流）。
+    pub log_buffer: crate::log_buffer::LogBuffer,
     /// GitHub OAuth 凭据；None = 未配置，路由返回 404。
     pub oauth_github: Option<crate::routes::oauth::GithubOAuthConfig>,
     /// 管理端数据库浏览（只读旁路的业务层抽象，不再暴露裸连接池）。
@@ -73,7 +75,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn new() -> Self {
+    /// `log_buffer` 由 main.rs 先构造（要装进 tracing subscriber）再传入，
+    /// 保证 admin 日志页与 BufferLayer 写的是同一个实例。
+    pub async fn with_log_buffer(log_buffer: crate::log_buffer::LogBuffer) -> Self {
         let config = Config::from_env();
         let pool = prepare_pool(&config.dsn).await;
 
@@ -118,6 +122,7 @@ impl AppState {
             admin: admin_service,
             tokens: Arc::new(TokenSigner::new(&config.jwt_secret)),
             metrics: Arc::new(crate::metrics::Metrics::new()),
+            log_buffer,
             oauth_github: config.oauth_github.map(|(client_id, client_secret)| {
                 crate::routes::oauth::GithubOAuthConfig {
                     client_id,

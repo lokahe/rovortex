@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod admin;
+pub mod admin_logs;
 pub mod auth;
 pub mod db;
 pub mod health;
@@ -52,6 +53,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/users/{id}/ban", put(admin::set_ban))
         .route("/api/admin/users/{id}/force-logout", post(admin::force_logout))
         .route("/api/admin/stats", get(admin::stats))
+        .route(
+            "/api/admin/logs",
+            get(admin_logs::list_logs),
+        )
+        .route("/api/admin/logs/stream", get(admin_logs::stream_logs))
         .route("/api/admin/db/tables", get(db::list_tables))
         .route("/api/admin/db/tables/{table}", get(db::browse))
         .layer(middleware::from_fn_with_state(

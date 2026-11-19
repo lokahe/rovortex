@@ -55,11 +55,26 @@ pub async fn request_id_and_log(
             "request completed"
         );
 
+        // 访问日志同步进进程内 LogBuffer（admin 日志页数据源）。
+        // 直接组装而非依赖 tracing 层：method/path 在 span 字段里，
+        // BufferLayer 的 event 回调拿不到。
+        if track {
+            state.log_buffer.push(crate::log_buffer::LogEntry::access(
+                if status.is_server_error() { "ERROR" } else { "INFO" },
+                "gateway_api::access",
+                format!("request completed"),
+                Some(request_id.clone()),
+                Some(method.to_string()),
+                Some(path.clone()),
+                Some(status.as_u16()),
+                Some(elapsed_ms),
+            ));
+        }
+
         // 失败请求在 INFO 日志之上多一行 ERROR，排障时先看到它。
         if status.is_server_error() {
             tracing::error!(status = status.as_u16(), "request failed with server error");
         }
-
         if track {
             state.metrics.observe(
                 &route_template(&path),
