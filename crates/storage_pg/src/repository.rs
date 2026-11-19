@@ -50,6 +50,7 @@ mod row {
         pub avatar_url: Option<String>,
         pub bio: Option<String>,
         pub website_url: Option<String>,
+        pub deleted_at: Option<DateTime<Utc>>,
         pub created_at: DateTime<Utc>,
         pub updated_at: DateTime<Utc>,
     }
@@ -74,6 +75,7 @@ fn into_user(r: row::UserRow) -> User {
         email_verified: r.email_verified,
         is_admin: r.is_admin,
         status: r.status,
+        deleted_at: r.deleted_at,
         display_name: r.display_name,
         avatar_url: r.avatar_url,
         bio: r.bio,
@@ -90,7 +92,7 @@ impl UserRepository for PgUserRepository {
             row::UserRow,
             r#"INSERT INTO users (id, username, email, password_hash)
                VALUES ($1, $2, $3, $4)
-               RETURNING id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at"#,
+               RETURNING id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, deleted_at, created_at, updated_at"#,
             Uuid::now_v7(),
             new_user.username,
             new_user.email,
@@ -106,7 +108,7 @@ impl UserRepository for PgUserRepository {
     async fn find_by_username(&self, username: &str) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, deleted_at, created_at, updated_at
                FROM users WHERE username_key = $1"#,
             username.to_lowercase(),
         )
@@ -120,7 +122,7 @@ impl UserRepository for PgUserRepository {
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, deleted_at, created_at, updated_at
                FROM users WHERE email_key = $1"#,
             email.to_lowercase(),
         )
@@ -134,7 +136,7 @@ impl UserRepository for PgUserRepository {
     async fn find_by_login(&self, login: &str) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, deleted_at, created_at, updated_at
                FROM users WHERE username_key = $1 OR email_key = $1"#,
             login.to_lowercase(),
         )
@@ -148,7 +150,7 @@ impl UserRepository for PgUserRepository {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, deleted_at, created_at, updated_at
                FROM users WHERE id = $1"#,
             id,
         )
@@ -253,7 +255,7 @@ impl UserRepository for PgUserRepository {
         let pattern = q.map(|s| format!("%{}%", s.to_lowercase()));
         let rows = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, deleted_at, created_at, updated_at
                FROM users
                WHERE ($1::text IS NULL OR email_key LIKE $1 OR username_key LIKE $1)
                ORDER BY created_at DESC
@@ -287,6 +289,46 @@ impl UserRepository for PgUserRepository {
             r#"UPDATE users SET status = $2, updated_at = now() WHERE id = $1"#,
             id,
             status,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
+        if result.rows_affected() == 0 {
+            return Err(UserError::UserNotFound);
+        }
+        Ok(())
+    }
+
+    async fn soft_delete(&self, id: Uuid) -> Result<(), UserError> {
+        let result = sqlx::query!(
+            r#"UPDATE users
+               SET status = 2,
+                   deleted_at = now(),
+                   display_name = NULL,
+                   avatar_url = NULL,
+                   bio = NULL,
+                   website_url = NULL,
+                   updated_at = now()
+               WHERE id = $1"#,
+            id,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
+        if result.rows_affected() == 0 {
+            return Err(UserError::UserNotFound);
+        }
+        Ok(())
+    }
+
+    async fn restore(&self, id: Uuid) -> Result<(), UserError> {
+        let result = sqlx::query!(
+            r#"UPDATE users
+               SET status = 0,
+                   deleted_at = NULL,
+                   updated_at = now()
+               WHERE id = $1"#,
+            id,
         )
         .execute(&self.pool)
         .await

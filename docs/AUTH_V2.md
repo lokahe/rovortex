@@ -1,7 +1,7 @@
 # 认证体系 v2 设计：OAuth 一键登录 + 邮箱 Magic Link（全程免密）
 
 > 状态：**GitHub OAuth + Magic Link 已全部实施**（P5-1/P5-2，2026-11）。P5 完成。
-> P6 账号管理（2026-11）：找回密码、改用户名、用户资料两层模型（canonical 列 + user_identities.raw_profile 回填/解绑）、admin 强制下线 —— 设计见 docs/P6-2_PROFILE_DESIGN.md。
+> P6 账号管理（2026-11）：找回密码、改用户名、用户资料两层模型（canonical 列 + user_identities.raw_profile 回填/解绑）、会话管理（设备列表/踢设备）、账号注销（软删 + 30 天冷静期 + 邮箱恢复）、admin 强制下线 —— 设计见 docs/P6-2_PROFILE_DESIGN.md。
 > 前置阅读：docs/ARCHITECTURE.md（分层）、docs/DATABASE.md（选型）。
 > 时序图：[oauth-sequence-diagram.html](./oauth-sequence-diagram.html) —— 授权码流程四阶段可视化。
 

@@ -60,6 +60,9 @@ impl EmailVerificationRepository for PgEmailVerificationRepository {
             let purpose = match r.purpose.as_str() {
                 "email_change" => VerificationPurpose::EmailChange,
                 "magic_link" => VerificationPurpose::MagicLink,
+                "password_reset" => VerificationPurpose::PasswordReset,
+                "account_deletion" => VerificationPurpose::AccountDeletion,
+                "account_recovery" => VerificationPurpose::AccountRecovery,
                 _ => VerificationPurpose::Signup,
             };
             (r.email, purpose, r.user_id)

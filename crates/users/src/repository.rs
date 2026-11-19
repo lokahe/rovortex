@@ -77,6 +77,13 @@ pub trait UserRepository: Send + Sync {
     /// 设置用户状态（admin 封禁/解封）。实现方需同步更新 updated_at。
     async fn set_status(&self, id: uuid::Uuid, status: i16) -> Result<(), UserError>;
 
+    /// 注销（软删）：置 status=2 + deleted_at、清空展示资料。
+    /// 邮箱保留占位（唯一索引仍挡新注册），冷静期后由 cron 硬删释放。
+    async fn soft_delete(&self, id: uuid::Uuid) -> Result<(), UserError>;
+
+    /// 恢复注销账号（冷静期内）：status 回 0、清 deleted_at。
+    async fn restore(&self, id: uuid::Uuid) -> Result<(), UserError>;
+
     /// 置为管理员（启动时 ROVORTEX_ADMIN_EMAILS 提升首个 admin）。
     async fn promote_admin(&self, id: uuid::Uuid) -> Result<(), UserError>;
 

@@ -68,6 +68,7 @@ impl IntoResponse for ApiError {
                         (StatusCode::TOO_MANY_REQUESTS, "too_many_attempts")
                     }
                     UserError::AccountBanned => (StatusCode::FORBIDDEN, "account_banned"),
+                    UserError::AccountDeleted => (StatusCode::FORBIDDEN, "account_deleted"),
                     UserError::LastLoginMethod => {
                         (StatusCode::CONFLICT, "last_login_method")
                     }

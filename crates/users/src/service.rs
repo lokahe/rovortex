@@ -24,6 +24,10 @@ const REFRESH_TTL_DAYS: i64 = 30;
 const EMAIL_VERIFICATION_TTL_MINS: i64 = 15;
 /// users.status 的封禁值（与 admin::BANNED_STATUS 一致）。
 pub const BANNED_STATUS: i16 = 1;
+/// users.status 的注销值（软删，冷静期内可恢复）。
+pub const DELETED_STATUS: i16 = 2;
+/// 注销冷静期：到期由 cron 硬删（P7）。
+pub const DELETION_GRACE_DAYS: i64 = 30;
 
 /// 一次登录/刷新产出的完整会话：领域层不关心 JWT 细节，
 /// access token 由表现层用 TokenSigner 另行签发。
@@ -523,6 +527,9 @@ impl UserService {
         if user.status == BANNED_STATUS {
             return Err(UserError::AccountBanned);
         }
+        if user.status == DELETED_STATUS {
+            return Err(UserError::AccountDeleted);
+        }
         let raw = generate_refresh_token();
         let expires_at = chrono::Utc::now() + chrono::Duration::days(REFRESH_TTL_DAYS);
         self.refresh
@@ -888,6 +895,164 @@ impl UserService {
         self.refresh.list_active_for_user(user_id).await
     }
 
+    /// 请求注销账号：给登录邮箱发确认链接（一次性，15 分钟）。
+    /// 防枚举不适用——调用方已登录，邮箱是自己的。
+    pub async fn request_account_deletion(
+        &self,
+        user_id: Uuid,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
+        let user = self
+            .repo
+            .find_by_id(user_id)
+            .await?
+            .ok_or(UserError::UserNotFound)?;
+        self.audit(
+            Some(user_id),
+            AuditAction::AccountDeletionRequested,
+            format!("email={}", user.email),
+            client_ip,
+        ).await;
+        let raw = generate_refresh_token();
+        self.email_verifications
+            .insert(NewEmailVerification {
+                id: Uuid::now_v7(),
+                email: user.email.clone(),
+                token_hash: hash_refresh_token(&raw),
+                purpose: VerificationPurpose::AccountDeletion,
+                user_id: Some(user_id),
+                expires_at: chrono::Utc::now()
+                    + chrono::Duration::minutes(EMAIL_VERIFICATION_TTL_MINS),
+            })
+            .await?;
+        let link = format!(
+            "{}/api/auth/account/confirm-deletion?token={}",
+            self.verify_url_base, raw
+        );
+        let html = account_deletion_email_html(&user.username, &link, DELETION_GRACE_DAYS);
+        if let Err(e) = self
+            .mail
+            .send(&user.email, "Rovortex 账号注销确认", &html)
+            .await
+        {
+            tracing::warn!(email = %user.email, error = %e, "failed to send account deletion mail");
+        }
+        Ok(())
+    }
+
+    /// 确认注销：消费 token → 软删（status=2、清资料）→ 吊销全部会话。
+    /// 原邮箱**保留占位**（唯一索引仍挡新注册），确保冷静期内可恢复、
+    /// 且注销账号的邮箱不被冒用；冷静期后由 cron 硬删时自然释放。
+    pub async fn confirm_account_deletion(
+        &self,
+        raw_token: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
+        let token_hash = hash_refresh_token(raw_token);
+        let (email, purpose, user_id) = self
+            .email_verifications
+            .consume_by_hash(&token_hash)
+            .await?
+            .ok_or(UserError::InvalidRefreshToken)?;
+        if purpose != VerificationPurpose::AccountDeletion {
+            return Err(UserError::InvalidRefreshToken);
+        }
+        let Some(user_id) = user_id else {
+            return Err(UserError::InvalidRefreshToken);
+        };
+        self.repo.soft_delete(user_id).await?;
+        self.refresh.revoke_all_for_user(user_id).await?;
+        self.audit(Some(user_id), AuditAction::AccountDeleted, format!("email={email}"), client_ip).await;
+        Ok(())
+    }
+
+    /// 请求恢复注销账号：向原邮箱发恢复链接。
+    /// 原邮箱在注销后仍被占位（唯一索引保留），find_by_email 可命中软删行。
+    /// 防枚举：未注册/未注销/冷静期外一律恒 Ok 不发信。
+    pub async fn request_account_recovery(
+        &self,
+        email: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
+        validate_email(email)?;
+        let Some(user) = self.repo.find_by_email(email).await? else {
+            return Ok(());
+        };
+        if user.status != DELETED_STATUS {
+            return Ok(());
+        }
+        if let Some(deleted_at) = user.deleted_at {
+            if chrono::Utc::now() - deleted_at > chrono::Duration::days(DELETION_GRACE_DAYS) {
+                return Ok(());
+            }
+        }
+        let user_id = user.id;
+        self.audit(
+            Some(user_id),
+            AuditAction::AccountRecoveryRequested,
+            format!("email={email}"),
+            client_ip,
+        ).await;
+        let raw = generate_refresh_token();
+        self.email_verifications
+            .insert(NewEmailVerification {
+                id: Uuid::now_v7(),
+                email: email.to_string(),
+                token_hash: hash_refresh_token(&raw),
+                purpose: VerificationPurpose::AccountRecovery,
+                user_id: Some(user_id),
+                expires_at: chrono::Utc::now()
+                    + chrono::Duration::minutes(EMAIL_VERIFICATION_TTL_MINS),
+            })
+            .await?;
+        let link = format!(
+            "{}/api/auth/account/confirm-recovery?token={}",
+            self.verify_url_base, raw
+        );
+        let html = account_recovery_email_html(&user.username, &link, user.deleted_at, DELETION_GRACE_DAYS);
+        if let Err(e) = self.mail.send(email, "Rovortex 账号恢复", &html).await {
+            tracing::warn!(email, error = %e, "failed to send account recovery mail");
+        }
+        Ok(())
+    }
+
+    /// 确认恢复：消费 token → status 回 0、email 换回、清 deleted_at。
+    /// 冷静期外（deleted_at 超过 DELETION_GRACE_DAYS）拒绝——数据可能已被 cron 清理。
+    pub async fn confirm_account_recovery(
+        &self,
+        raw_token: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
+        let token_hash = hash_refresh_token(raw_token);
+        let (email, purpose, user_id) = self
+            .email_verifications
+            .consume_by_hash(&token_hash)
+            .await?
+            .ok_or(UserError::InvalidRefreshToken)?;
+        if purpose != VerificationPurpose::AccountRecovery {
+            return Err(UserError::InvalidRefreshToken);
+        }
+        let Some(user_id) = user_id else {
+            return Err(UserError::InvalidRefreshToken);
+        };
+        let user = self
+            .repo
+            .find_by_id(user_id)
+            .await?
+            .ok_or(UserError::UserNotFound)?;
+        if user.status != DELETED_STATUS {
+            return Err(UserError::InvalidRefreshToken);
+        }
+        if let Some(deleted_at) = user.deleted_at {
+            if chrono::Utc::now() - deleted_at > chrono::Duration::days(DELETION_GRACE_DAYS) {
+                return Err(UserError::InvalidRefreshToken);
+            }
+        }
+        self.repo.restore(user_id).await?;
+        self.audit(Some(user_id), AuditAction::AccountRestored, format!("email={email}"), client_ip).await;
+        Ok(())
+    }
+
     /// 踢掉指定会话（含当前会话自身：踢了就重新登录，语义最简）。
     pub async fn revoke_session(
         &self,
@@ -994,6 +1159,48 @@ fn password_reset_email_html(username: &str, link: &str) -> String {
     )
 }
 
+/// 账号注销确认邮件 HTML 模板。
+fn account_deletion_email_html(username: &str, link: &str, grace_days: i64) -> String {
+    format!(
+        r#"<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+  <h2>你好，{username}</h2>
+  <p>你请求注销账号。请点击下面的链接确认（15 分钟内有效，仅可使用一次）：</p>
+  <p><a href="{link}" style="display:inline-block;padding:10px 20px;background:#dc2626;color:#fff;text-decoration:none;border-radius:6px">确认注销</a></p>
+  <p>注销后：</p>
+  <ul style="color:#555;font-size:14px">
+    <li>你将无法登录该账号，所有登录会话立即失效；</li>
+    <li>绑定的第三方账号（GitHub 等）全部解除绑定；</li>
+    <li>资料将被清空；</li>
+    <li>邮箱与用户名仍保留占位，{grace_days} 天内可凭本邮箱恢复账号。</li>
+  </ul>
+  <p style="color:#888;font-size:13px">如果你没有请求注销，请忽略本邮件，账号不会被删除。</p>
+</div>"#,
+        grace_days = grace_days
+    )
+}
+
+/// 账号恢复邮件 HTML 模板。
+fn account_recovery_email_html(
+    username: &str,
+    link: &str,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    grace_days: i64,
+) -> String {
+    let deadline = deleted_at
+        .map(|d| (d + chrono::Duration::days(grace_days)).format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "未知".into());
+    format!(
+        r#"<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+  <h2>你好，{username}</h2>
+  <p>你的账号处于注销冷静期。请点击下面的链接恢复（15 分钟内有效，仅可使用一次）：</p>
+  <p><a href="{link}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px">恢复账号</a></p>
+  <p style="color:#888;font-size:13px">冷静期截止 {deadline}，逾期账号数据将被彻底删除，无法恢复。</p>
+  <p style="color:#888;font-size:13px">如果你没有请求恢复，请忽略本邮件。</p>
+</div>"#,
+        deadline = deadline
+    )
+}
+
 /// 生成 256 位随机 refresh token（URL 安全 Base64）。
 fn generate_refresh_token() -> String {
     use base64::Engine as _;
@@ -1079,6 +1286,7 @@ mod tests {
                 email_verified: false,
                 is_admin: false,
                 status: 0,
+                deleted_at: None,
                 display_name: None,
                 avatar_url: None,
                 bio: None,
@@ -1241,6 +1449,28 @@ mod tests {
             Ok(self.store.lock().unwrap().len() as i64)
         }
 
+        async fn soft_delete(&self, id: Uuid) -> Result<(), UserError> {
+            let mut store = self.store.lock().unwrap();
+            if let Some(u) = store.get_mut(&id) {
+                u.status = 2;
+                u.deleted_at = Some(Utc::now());
+                u.display_name = None;
+                u.avatar_url = None;
+                u.bio = None;
+                u.website_url = None;
+            }
+            Ok(())
+        }
+
+        async fn restore(&self, id: Uuid) -> Result<(), UserError> {
+            let mut store = self.store.lock().unwrap();
+            if let Some(u) = store.get_mut(&id) {
+                u.status = 0;
+                u.deleted_at = None;
+            }
+            Ok(())
+        }
+
         async fn set_status(&self, id: Uuid, _status: i16) -> Result<(), UserError> {
             let mut store = self.store.lock().unwrap();
             let _user = store.get_mut(&id).ok_or(UserError::UserNotFound)?;
@@ -1386,6 +1616,8 @@ mod tests {
                     n += 1;
                 }
             }
+            // 与 PG 语义一致：revoked 行不再出现在 list_active_for_user
+            self.sessions.lock().unwrap().retain(|_, (uid, _)| *uid != user_id);
             Ok(n)
         }
 
@@ -2388,6 +2620,79 @@ mod tests {
         drop(mails);
         assert!(matches!(
             svc.confirm_password_reset(&signup_raw, "N3w-pass-word!", "6.6.6.6").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn account_deletion_soft_delete_and_recovery_flow() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+
+        let reg = svc
+            .register("delme", "delme@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .await
+            .unwrap();
+        let user_id = reg.user.id;
+
+        // 注销后：原凭据登录被拒（AccountDeleted），会话全部吊销
+        svc.request_account_deletion(user_id, "127.0.0.1").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        assert_eq!(mails.len(), 1);
+        let raw = extract_token_from_html(&mails[0].2);
+        drop(mails);
+        svc.confirm_account_deletion(&raw, "127.0.0.1").await.unwrap();
+
+        assert!(matches!(
+            svc.login("k:del", "delme@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await,
+            Err(UserError::AccountDeleted)
+        ));
+        assert_eq!(svc.list_sessions(user_id).await.unwrap().len(), 0);
+
+        // 冷静期内注册同邮箱：被保留占位挡住（EmailTaken）
+        assert!(matches!(
+            svc.register("delme2", "delme@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await,
+            Err(UserError::EmailTaken(_))
+        ));
+
+        // 他人 token 不能恢复我的账号
+        let other = svc
+            .register("keeper", "keeper@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .await
+            .unwrap();
+        svc.request_account_deletion(other.user.id, "127.0.0.1").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let other_raw = extract_token_from_html(&mails[1].2);
+        drop(mails);
+        assert!(matches!(
+            svc.confirm_account_recovery(&other_raw, "127.0.0.1").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
+
+        // 正常恢复：先请求（防枚举——未删账号不发信）
+        svc.request_account_recovery("keeper@example.com", "6.6.6.6").await.unwrap();
+        assert_eq!(sent.sent.lock().unwrap().len(), 2);
+        svc.request_account_recovery("delme@example.com", "6.6.6.6").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let rec_raw = extract_token_from_html(&mails[2].2);
+        drop(mails);
+        svc.confirm_account_recovery(&rec_raw, "127.0.0.1").await.unwrap();
+
+        // 恢复后：原凭据可登录，profile 恢复
+        let login = svc
+            .login("k:rec", "delme@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .await
+            .unwrap();
+        assert_eq!(login.user.id, user_id);
+        assert_eq!(login.user.username, "delme");
+
+        // 注销 token 已被吊销且一次性：再次确认失败
+        assert!(matches!(
+            svc.confirm_account_deletion(&raw, "127.0.0.1").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
+        // 恢复 token 同样一次性
+        assert!(matches!(
+            svc.confirm_account_recovery(&rec_raw, "127.0.0.1").await,
             Err(UserError::InvalidRefreshToken)
         ));
     }

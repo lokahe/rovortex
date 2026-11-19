@@ -18,8 +18,10 @@ pub struct User {
     pub email_verified: bool,
     /// 管理员标记（admin API 授权依据）。
     pub is_admin: bool,
-    /// 账号状态：0=正常，1=封禁（users.status SMALLINT）。
+    /// 账号状态：0=正常，1=封禁，2=已注销（软删，冷静期内可恢复）。
     pub status: i16,
+    /// 注销时间（status=2 时非空）；到期硬删由 cron 处理。
+    pub deleted_at: Option<DateTime<Utc>>,
     /// 展示名（None = 前端 fallback username）。
     pub display_name: Option<String>,
     /// 头像 URL（None = 前端默认头像）。
@@ -75,6 +77,9 @@ pub enum UserError {
 
     #[error("account is banned")]
     AccountBanned,
+
+    #[error("account is deleted")]
+    AccountDeleted,
 
     #[error("password hashing error: {0}")]
     Hashing(String),

@@ -25,6 +25,10 @@ pub enum AuditAction {
     ProfileUpdated,
     IdentityUnlinked,
     SessionRevoked,
+    AccountDeletionRequested,
+    AccountDeleted,
+    AccountRecoveryRequested,
+    AccountRestored,
     AdminForceLogout,
 }
 
@@ -48,6 +52,10 @@ impl AuditAction {
             AuditAction::ProfileUpdated => "profile_updated",
             AuditAction::IdentityUnlinked => "identity_unlinked",
             AuditAction::SessionRevoked => "session_revoked",
+            AuditAction::AccountDeletionRequested => "account_deletion_requested",
+            AuditAction::AccountDeleted => "account_deleted",
+            AuditAction::AccountRecoveryRequested => "account_recovery_requested",
+            AuditAction::AccountRestored => "account_restored",
             AuditAction::AdminForceLogout => "admin_force_logout",
         }
     }

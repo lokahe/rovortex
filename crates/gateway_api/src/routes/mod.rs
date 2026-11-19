@@ -1,5 +1,6 @@
 //! 路由装配：只做协议适配，业务全部委托给 users 模块。
 
+pub mod account;
 pub mod admin;
 pub mod auth;
 pub mod db;
@@ -39,6 +40,7 @@ pub fn router(state: AppState) -> Router {
             "/api/users/me/sessions/{id}",
             delete(users_me::revoke_session),
         )
+        .route("/api/auth/account/delete", post(account::request_deletion))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
@@ -73,6 +75,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/magic-link/verify", get(magic::verify_magic_link))
         .route("/api/auth/password-reset/request", post(password_reset::request_reset))
         .route("/api/auth/password-reset/confirm", get(password_reset::confirm_form).post(password_reset::confirm_submit))
+        .route("/api/auth/account/recover", post(account::request_recovery))
+        .route("/api/auth/account/confirm-deletion", get(account::confirm_deletion))
+        .route("/api/auth/account/confirm-recovery", get(account::confirm_recovery))
         .merge(protected)
         .merge(admin_routes)
         .with_state(state)

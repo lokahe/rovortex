@@ -116,7 +116,7 @@ fn form_page(token: &str) -> Response {
         .into_response()
 }
 
-fn result_page(title: &str, detail: &str) -> Response {
+pub fn result_page(title: &str, detail: &str) -> Response {
     let body = format!(
         r#"<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8"><title>{title}</title></head>
 <body style="font-family:sans-serif;text-align:center;padding-top:80px">
@@ -131,6 +131,6 @@ fn result_page(title: &str, detail: &str) -> Response {
         .into_response()
 }
 
-fn error_page(title: &str, detail: &str) -> Response {
+pub fn error_page(title: &str, detail: &str) -> Response {
     result_page(title, detail)
 }

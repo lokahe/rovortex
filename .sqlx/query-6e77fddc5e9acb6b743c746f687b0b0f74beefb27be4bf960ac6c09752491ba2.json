@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users (id, username, email, password_hash)\n               VALUES ($1, $2, $3, $4)\n               RETURNING id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at",
+  "query": "SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, deleted_at, created_at, updated_at\n               FROM users\n               WHERE ($1::text IS NULL OR email_key LIKE $1 OR username_key LIKE $1)\n               ORDER BY created_at DESC\n               LIMIT $2 OFFSET $3",
   "describe": {
     "columns": [
       {
@@ -70,21 +70,25 @@
       },
       {
         "ordinal": 13,
-        "name": "created_at",
+        "name": "deleted_at",
         "type_info": "Timestamptz"
       },
       {
         "ordinal": 14,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
         "Text",
-        "Text",
-        "Text"
+        "Int8",
+        "Int8"
       ]
     },
     "nullable": [
@@ -101,9 +105,10 @@
       true,
       true,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "e8aa00d74c415997181c7c156f9156bc5b7ba114d4d4f88a1a77a3e7b14db010"
+  "hash": "6e77fddc5e9acb6b743c746f687b0b0f74beefb27be4bf960ac6c09752491ba2"
 }

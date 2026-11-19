@@ -137,6 +137,8 @@ curl -X POST http://localhost:8080/api/auth/magic-link `
 | `/api/auth/oauth/github` · `/callback` | GET | GitHub OAuth 登录 |
 | `/api/auth/magic-link` · `/verify` | POST / GET | Magic Link 登录 |
 | `/api/auth/password-reset/request` · `/confirm` | POST / GET | 找回密码（响应恒 202，防枚举） |
+| `/api/auth/account/delete` · `/confirm-deletion` | POST / GET | 账号注销（软删 + 30 天冷静期，会话全吊销） |
+| `/api/auth/account/recover` · `/confirm-recovery` | POST / GET | 注销账号恢复（冷静期内，响应恒 202 防枚举） |
 | `/api/users/me` | GET | 当前用户（Bearer JWT） |
 | `/api/users/me/password` · `/me/email` · `/me/username` | PUT | 改密码 / 改邮箱 / 改用户名 |
 | `/api/users/me/profile` | PATCH | 改资料（部分更新 / 清空字段） |
@@ -166,7 +168,7 @@ curl -X POST http://localhost:8080/api/auth/magic-link `
 | Phase 3 | PostgreSQL + sqlx 落地（编译期校验 + 自动迁移） | ✅ |
 | Phase 4 | 邮箱验证、审计日志、访问日志、/metrics | ✅ |
 | Phase 5 | GitHub OAuth + Magic Link 免密登录 | ✅ |
-| Phase 6 | 找回密码、改用户名、用户资料（含平台资料回填/解绑）、会话管理（列表/踢设备）、admin 强制下线 | ✅ |
+| Phase 6 | 找回密码、改用户名、用户资料（含平台资料回填/解绑）、会话管理（列表/踢设备）、账号注销/恢复（软删+冷静期）、admin 强制下线 | ✅ |
 | Phase 7 | RBAC 权限、更多业务模块 | ⏳ |
 
 详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/AUTH_V2.md](docs/AUTH_V2.md)。

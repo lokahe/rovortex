@@ -17,6 +17,10 @@ pub enum VerificationPurpose {
     MagicLink,
     /// 忘记密码：token 授权重置该邮箱账号的密码。
     PasswordReset,
+    /// 账号注销：确认邮件链接后执行软删。
+    AccountDeletion,
+    /// 注销恢复（冷静期内）：token 授权恢复账号并取回原邮箱。
+    AccountRecovery,
 }
 
 impl VerificationPurpose {
@@ -26,6 +30,8 @@ impl VerificationPurpose {
             VerificationPurpose::EmailChange => "email_change",
             VerificationPurpose::MagicLink => "magic_link",
             VerificationPurpose::PasswordReset => "password_reset",
+            VerificationPurpose::AccountDeletion => "account_deletion",
+            VerificationPurpose::AccountRecovery => "account_recovery",
         }
     }
 }
