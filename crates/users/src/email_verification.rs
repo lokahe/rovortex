@@ -15,6 +15,8 @@ pub enum VerificationPurpose {
     EmailChange,
     /// 免密登录：token 即登录凭据（验证后签发会话）。
     MagicLink,
+    /// 忘记密码：token 授权重置该邮箱账号的密码。
+    PasswordReset,
 }
 
 impl VerificationPurpose {
@@ -23,6 +25,7 @@ impl VerificationPurpose {
             VerificationPurpose::Signup => "signup",
             VerificationPurpose::EmailChange => "email_change",
             VerificationPurpose::MagicLink => "magic_link",
+            VerificationPurpose::PasswordReset => "password_reset",
         }
     }
 }

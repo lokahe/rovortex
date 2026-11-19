@@ -7,6 +7,7 @@ pub mod health;
 pub mod magic;
 pub mod metrics;
 pub mod oauth;
+pub mod password_reset;
 pub mod session;
 pub mod users;
 pub mod users_me;
@@ -54,6 +55,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/oauth/github/callback", get(oauth::github_callback))
         .route("/api/auth/magic-link", post(magic::request_magic_link))
         .route("/api/auth/magic-link/verify", get(magic::verify_magic_link))
+        .route("/api/auth/password-reset/request", post(password_reset::request_reset))
+        .route("/api/auth/password-reset/confirm", get(password_reset::confirm_form).post(password_reset::confirm_submit))
         .merge(protected)
         .merge(admin_routes)
         .with_state(state)

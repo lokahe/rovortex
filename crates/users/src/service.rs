@@ -620,6 +620,76 @@ impl UserService {
         self.login_with_identity("magic", &email, Some(&email), client_ip)
             .await
     }
+
+    /// 忘记密码：给邮箱发重置链接（一次性，15 分钟有效）。
+    ///
+    /// 防枚举：未注册邮箱不发信但恒返回 Ok（不泄露注册状态）。
+    /// 只对有密码的账号发信——纯 OAuth/Magic 用户无需密码重置。
+    /// 发信失败不阻断流程（用户可重发），只记录。
+    pub async fn request_password_reset(&self, email: &str, client_ip: &str) -> Result<(), UserError> {
+        validate_email(email)?;
+        let Some(user) = self.repo.find_by_email(email).await? else {
+            return Ok(());
+        };
+        if user.password_hash.is_none() {
+            return Ok(());
+        }
+        self.audit(
+            Some(user.id),
+            AuditAction::PasswordResetRequested,
+            format!("email={email}"),
+            client_ip,
+        );
+        let raw = generate_refresh_token();
+        self.email_verifications
+            .insert(NewEmailVerification {
+                id: Uuid::now_v7(),
+                email: email.to_string(),
+                token_hash: hash_refresh_token(&raw),
+                purpose: VerificationPurpose::PasswordReset,
+                user_id: Some(user.id),
+                expires_at: chrono::Utc::now()
+                    + chrono::Duration::minutes(EMAIL_VERIFICATION_TTL_MINS),
+            })
+            .await?;
+        let link = format!(
+            "{}/api/auth/password-reset/confirm?token={}",
+            self.verify_url_base, raw
+        );
+        let html = password_reset_email_html(&user.username, &link);
+        if let Err(e) = self.mail.send(email, "Rovortex 密码重置", &html).await {
+            tracing::warn!(email, error = %e, "failed to send password reset mail");
+        }
+        Ok(())
+    }
+
+    /// 确认密码重置：消费一次性 token → 设置新密码（Argon2id）
+    /// → 吊销全部会话（防止重置前的旧会话继续有效）。
+    pub async fn confirm_password_reset(
+        &self,
+        raw_token: &str,
+        new_password: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
+        validate_password(new_password)?;
+        let token_hash = hash_refresh_token(raw_token);
+        let (_, purpose, user_id) = self
+            .email_verifications
+            .consume_by_hash(&token_hash)
+            .await?
+            .ok_or(UserError::InvalidRefreshToken)?;
+        if purpose != VerificationPurpose::PasswordReset {
+            return Err(UserError::InvalidRefreshToken);
+        }
+        let Some(user_id) = user_id else {
+            return Err(UserError::InvalidRefreshToken);
+        };
+        let new_hash = hash_password(new_password)?;
+        self.repo.update_password_hash(user_id, &new_hash).await?;
+        self.refresh.revoke_all_for_user(user_id).await?;
+        self.audit(Some(user_id), AuditAction::PasswordChanged, "password_reset", client_ip);
+        Ok(())
+    }
 }
 
 /// 验证邮件 HTML 模板（注册）。
@@ -656,6 +726,19 @@ fn magic_link_email_html(email: &str, link: &str) -> String {
   <p><a href="{link}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px">一键登录</a></p>
   <p style="color:#888;font-size:13px">如果按钮无法点击，请复制此链接到浏览器：<br><a href="{link}">{link}</a></p>
   <p style="color:#888;font-size:13px">如果你没有请求登录，请忽略本邮件，任何人没有此链接都无法登录你的账号。</p>
+</div>"#
+    )
+}
+
+/// 密码重置邮件 HTML 模板。
+fn password_reset_email_html(username: &str, link: &str) -> String {
+    format!(
+        r#"<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+  <h2>你好，{username}</h2>
+  <p>你请求重置账号密码。请点击下面的链接设置新密码（15 分钟内有效，仅可使用一次）：</p>
+  <p><a href="{link}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px">重置密码</a></p>
+  <p style="color:#888;font-size:13px">重置成功后，你之前的所有登录会话将被吊销。</p>
+  <p style="color:#888;font-size:13px">如果你没有请求重置密码，请忽略本邮件，你的密码不会被更改。</p>
 </div>"#
     )
 }
@@ -1005,6 +1088,23 @@ mod tests {
         service_with_mail(TestMailSender::default()).0
     }
 
+    fn service_with_mail(mail: TestMailSender) -> (UserService, Arc<TestMailSender>) {
+        let mail = Arc::new(mail);
+        (
+            UserService::new(
+                Arc::new(TestRepository::new()),
+                Arc::new(TestRefreshRepository::new()),
+                Arc::new(TestVerificationRepository::new()),
+                mail.clone() as Arc<dyn MailSender>,
+                Arc::new(NoopLoginGuard),
+                Arc::new(TestAuditRepository::default()),
+                Arc::new(TestIdentityRepository::new()),
+                "http://localhost:8080".to_string(),
+            ),
+            mail,
+        )
+    }
+
     /// 收集审计事件的桩（供断言）。
     #[derive(Default)]
     struct TestAuditRepository {
@@ -1025,23 +1125,6 @@ mod tests {
         ) -> Result<Vec<crate::audit::AuditEntry>, UserError> {
             Ok(Vec::new())
         }
-    }
-
-    fn service_with_mail(mail: TestMailSender) -> (UserService, Arc<TestMailSender>) {
-        let mail = Arc::new(mail);
-        (
-            UserService::new(
-                Arc::new(TestRepository::new()),
-                Arc::new(TestRefreshRepository::new()),
-                Arc::new(TestVerificationRepository::new()),
-                mail.clone() as Arc<dyn MailSender>,
-                Arc::new(NoopLoginGuard),
-                Arc::new(TestAuditRepository::default()),
-                Arc::new(TestIdentityRepository::new()),
-                "http://localhost:8080".to_string(),
-            ),
-            mail,
-        )
     }
 
     /// 测试用外部身份仓储桩。
@@ -1668,5 +1751,65 @@ mod tests {
         // 未注册邮箱：恒 Ok 且发信（登录即注册语义）
         svc.request_magic_link("ghost-magic@example.com", "6.6.6.6").await.unwrap();
         assert_eq!(sent.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn password_reset_full_flow_changes_password_and_revokes_sessions() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+        let s = svc
+            .register("marc", "marc@example.com", "0ld-pass-word!", "9.9.9.9")
+            .await
+            .unwrap();
+
+        svc.request_password_reset("marc@example.com", "9.9.9.9").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        assert_eq!(mails.len(), 1, "reset mail sent");
+        assert_eq!(mails[0].0, "marc@example.com");
+        let raw = extract_token_from_html(&mails[0].2);
+        drop(mails);
+
+        svc.confirm_password_reset(&raw, "N3w-pass-word!", "9.9.9.9").await.unwrap();
+
+        // 新密码可登录，旧密码不可
+        assert!(svc.login("k:p", "marc", "N3w-pass-word!", "1.2.3.4").await.is_ok());
+        assert!(matches!(
+            svc.login("k:p", "marc", "0ld-pass-word!", "1.2.3.4").await,
+            Err(UserError::InvalidCredentials)
+        ));
+        let user = svc
+            .repository()
+            .find_by_id(s.user.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(user.password_hash.is_some());
+    }
+
+    #[tokio::test]
+    async fn password_reset_anti_enumeration_and_cross_purpose() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+
+        // 未注册邮箱：恒 Ok 且不发信（防枚举）
+        svc.request_password_reset("ghost@example.com", "6.6.6.6").await.unwrap();
+        assert!(sent.sent.lock().unwrap().is_empty());
+
+        // 无密码账号（纯 OAuth）：恒 Ok 且不发信
+        let _ = svc
+            .login_with_identity("github", "50005", Some("nora@example.com"), "6.6.6.6")
+            .await
+            .unwrap();
+        svc.request_password_reset("nora@example.com", "6.6.6.6").await.unwrap();
+        assert!(sent.sent.lock().unwrap().is_empty());
+
+        // signup token 不能当 password_reset 用
+        svc.register("paul", "paul@example.com", "Str0ng-pass!", "127.0.0.1").await.unwrap();
+        svc.request_email_verification("paul@example.com", "127.0.0.1").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let signup_raw = extract_token_from_html(&mails[0].2);
+        drop(mails);
+        assert!(matches!(
+            svc.confirm_password_reset(&signup_raw, "N3w-pass-word!", "6.6.6.6").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
     }
 }
