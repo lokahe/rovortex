@@ -20,7 +20,7 @@ use crate::repository::UserRepository;
 
 const REFRESH_TTL_DAYS: i64 = 30;
 const EMAIL_VERIFICATION_TTL_MINS: i64 = 15;
-/// users.status 的封禁值（与 gateway_api admin 路由的 STATUS_BANNED 一致）。
+/// users.status 的封禁值（与 admin::BANNED_STATUS 一致）。
 pub const BANNED_STATUS: i16 = 1;
 
 /// 一次登录/刷新产出的完整会话：领域层不关心 JWT 细节，
@@ -74,48 +74,14 @@ impl UserService {
         }
     }
 
-    /// 暴露仓储给表现层做按 id 的资料读取（受鉴权保护）。
+    /// 暴露仓储给表现层做按 id 的资料读取（受鉴权保护，如 require_admin / users_me）。
     pub fn repository(&self) -> Arc<dyn UserRepository> {
         Arc::clone(&self.repo)
     }
 
-    /// 暴露外部身份仓储（admin 详情页读取；仅 admin 路由可达）。
-    pub fn identities(&self) -> Arc<dyn OauthIdentityRepository> {
-        Arc::clone(&self.identities)
-    }
-
-    /// 读取单用户最近审计记录（admin 详情页）。
-    pub async fn audit_logs_for_user(
-        &self,
-        user_id: Uuid,
-        limit: i64,
-    ) -> Result<Vec<crate::audit::AuditEntry>, UserError> {
-        self.audit.list_for_user(user_id, limit).await
-    }
-
-    /// 吊销用户全部会话（admin 封禁时调用），返回吊销数量。
+    /// 吊销用户全部会话（改密码等场景复用），返回吊销数量。
     pub async fn revoke_sessions_for(&self, user_id: Uuid) -> Result<u64, UserError> {
         self.refresh.revoke_all_for_user(user_id).await
-    }
-
-    /// 启动时提升管理员：ROVORTEX_ADMIN_EMAILS 中的邮箱（大小写不敏感）
-    /// 若已有账号则置 is_admin = true。仅组合根调用，无 HTTP 入口。
-    pub async fn promote_admins(&self, emails: &[String]) -> Result<(), UserError> {
-        for email in emails {
-            let email = email.trim();
-            if email.is_empty() {
-                continue;
-            }
-            if let Some(user) = self.repo.find_by_email(email).await? {
-                if !user.is_admin {
-                    self.repo.promote_admin(user.id).await?;
-                    tracing::info!(email = %user.email, user_id = %user.id, "promoted to admin");
-                }
-            } else {
-                tracing::warn!(email, "admin email not found among users; will promote on next boot after the account exists");
-            }
-        }
-        Ok(())
     }
 
     /// 注册：校验 → 查重 → Argon2id 哈希 → 持久化 → 签发会话。

@@ -1,7 +1,9 @@
 //! 管理接口：`/api/admin/*`，全部挂 require_admin 中间件。
 //!
 //! 唯一授权依据是 users.is_admin（每请求实时查库，撤销立即生效）。
-//! 首个 admin 由 ROVORTEX_ADMIN_EMAILS 在组合根启动时提升。
+//! 首个 admin 由 ROVORTEX_ADMIN_EMAILS 在组合根启动时提升（AdminService）。
+//! 业务编排（列表/详情聚合/封禁+吊销会话/统计）在业务层 AdminService，
+//! 本文件只做参数解析与 DTO 映射。
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -12,10 +14,7 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::routes::auth::AdminUser;
 use crate::state::AppState;
-
-/// users.status 的封禁语义（业务层 BANNED_STATUS 的镜像；0001 建表 SMALLINT）。
-const STATUS_BANNED: i16 = rovortex_users::BANNED_STATUS;
-const STATUS_ACTIVE: i16 = 0;
+use rovortex_users::admin::BANNED_STATUS;
 
 #[derive(Debug, Serialize)]
 pub struct AdminUserView {
@@ -36,7 +35,7 @@ fn to_view(u: rovortex_users::User) -> AdminUserView {
         email: u.email,
         email_verified: u.email_verified,
         is_admin: u.is_admin,
-        banned: u.status == rovortex_users::BANNED_STATUS,
+        banned: u.status == BANNED_STATUS,
         created_at: u.created_at,
         updated_at: u.updated_at,
     }
@@ -67,15 +66,14 @@ pub async fn list_users(
     let page = query.page.unwrap_or(1).max(1);
     let offset = ((page - 1) as i64) * (per_page as i64);
 
-    let repo = state.users.repository();
-    let users = repo
+    let result = state
+        .admin
         .list_users(query.q.as_deref(), per_page as i64, offset)
         .await?;
-    let total = repo.count_users(query.q.as_deref()).await?;
 
     Ok(Json(ListUsersResponse {
-        users: users.into_iter().map(to_view).collect(),
-        total,
+        users: result.users.into_iter().map(to_view).collect(),
+        total: result.total,
         page,
         per_page,
     }))
@@ -113,18 +111,12 @@ pub async fn user_detail(
     _admin: AdminUser,
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<AdminUserDetail>, ApiError> {
-    let repo = state.users.repository();
-    let user = repo
-        .find_by_id(user_id)
-        .await?
-        .ok_or(ApiError::not_found())?;
-
-    let identities = state.users.identities().list_for_user(user_id).await?;
-    let audit_logs = state.users.audit_logs_for_user(user_id, 20).await?;
+    let detail = state.admin.user_detail(user_id, 20).await.map_err(|_| ApiError::not_found())?;
 
     Ok(Json(AdminUserDetail {
-        user: to_view(user),
-        identities: identities
+        user: to_view(detail.user),
+        identities: detail
+            .identities
             .into_iter()
             .map(|i| IdentityView {
                 provider: i.provider,
@@ -133,7 +125,8 @@ pub async fn user_detail(
                 created_at: i.created_at,
             })
             .collect(),
-        audit_logs: audit_logs
+        audit_logs: detail
+            .audit_logs
             .into_iter()
             .map(|a| AuditEntryView {
                 action: a.action,
@@ -151,7 +144,7 @@ pub struct BanRequest {
 }
 
 /// PUT /api/admin/users/:id/ban —— 封禁 / 解封。
-/// 封禁时同时吊销全部会话（已登录设备立即失效）。
+/// 封禁时同时吊销全部会话（已登录设备立即失效）——原子用例在 AdminService。
 pub async fn set_ban(
     State(state): State<AppState>,
     admin: AdminUser,
@@ -161,15 +154,7 @@ pub async fn set_ban(
     if user_id == admin.user_id {
         return Err(ApiError::bad_request("cannot ban yourself".into()));
     }
-    let status = if req.banned { STATUS_BANNED } else { STATUS_ACTIVE };
-    state
-        .users
-        .repository()
-        .set_status(user_id, status)
-        .await?;
-    if req.banned {
-        state.users.revoke_sessions_for(user_id).await?;
-    }
+    state.admin.set_ban(user_id, req.banned).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -189,12 +174,10 @@ pub async fn stats(
     _admin: AdminUser,
 ) -> Result<Json<StatsResponse>, ApiError> {
     let since = Utc::now() - chrono::Duration::days(7);
-    let repo = state.users.repository();
-    let total_users = repo.count_users(None).await?;
-    let events = repo.count_audit_by_action(since).await?;
+    let result = state.admin.stats(since).await?;
     Ok(Json(StatsResponse {
-        since,
-        total_users,
-        events,
+        since: result.since,
+        total_users: result.total_users,
+        events: result.events,
     }))
 }
