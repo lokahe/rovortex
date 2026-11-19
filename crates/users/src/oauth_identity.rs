@@ -16,7 +16,23 @@ pub struct ExternalIdentity {
     pub provider_uid: String,
     /// 平台报告的邮箱（可能为空，X 就不给）。
     pub email: Option<String>,
+    /// 平台原始资料缓存（key 由 provider 决定；magic 恒 None）。
+    pub raw_profile: Option<serde_json::Value>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 登录/绑定时由网关层打包传入的平台资料。
+///
+/// 规范字段（前 4 个）由业务层按「空缺才回填」写 users；
+/// raw 原样落 user_identities.raw_profile。
+#[derive(Debug, Clone, Default)]
+pub struct ExternalProfile {
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub bio: Option<String>,
+    pub website_url: Option<String>,
+    /// 平台原始 JSON（网关层已裁剪敏感字段）。
+    pub raw: Option<serde_json::Value>,
 }
 
 /// 新建外部身份绑定所需输入。
@@ -26,6 +42,7 @@ pub struct NewExternalIdentity {
     pub provider: String,
     pub provider_uid: String,
     pub email: Option<String>,
+    pub raw_profile: Option<serde_json::Value>,
 }
 
 /// 外部身份持久化契约。
@@ -55,5 +72,13 @@ pub trait OauthIdentityRepository: Send + Sync {
         &self,
         user_id: Uuid,
         provider: &str,
+    ) -> Result<(), crate::domain::UserError>;
+
+    /// 刷新平台原始资料缓存（每次登录调用；无资料传 None 不动旧值）。
+    async fn update_raw_profile(
+        &self,
+        user_id: Uuid,
+        provider: &str,
+        raw: Option<serde_json::Value>,
     ) -> Result<(), crate::domain::UserError>;
 }

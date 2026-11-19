@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO user_identities (id, user_id, provider, provider_uid, email)\n               VALUES ($1, $2, $3, $4, $5)\n               RETURNING id, user_id, provider, provider_uid, email, created_at",
+  "query": "INSERT INTO user_identities (id, user_id, provider, provider_uid, email, raw_profile)\n               VALUES ($1, $2, $3, $4, $5, $6)\n               RETURNING id, user_id, provider, provider_uid, email, raw_profile AS \"raw_profile: _\", created_at",
   "describe": {
     "columns": [
       {
@@ -30,6 +30,11 @@
       },
       {
         "ordinal": 5,
+        "name": "raw_profile: _",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
@@ -40,7 +45,8 @@
         "Uuid",
         "Text",
         "Text",
-        "Text"
+        "Text",
+        "Jsonb"
       ]
     },
     "nullable": [
@@ -49,8 +55,9 @@
       false,
       false,
       true,
+      true,
       false
     ]
   },
-  "hash": "31f15dc7ccea5b1284e57614c6671a651d098591ef63a018b86f104edafd7541"
+  "hash": "d85c0d8c1f77bcb4aff584468e3a72171749c3068b0a255001810a3eb58728d3"
 }

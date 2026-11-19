@@ -15,7 +15,7 @@ pub mod verify_email;
 
 use axum::Router;
 use axum::middleware;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 
 use crate::state::AppState;
 
@@ -25,6 +25,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/users/me/password", put(users_me::change_password))
         .route("/api/users/me/email", put(users_me::change_email))
         .route("/api/users/me/username", put(users_me::change_username))
+        .route("/api/users/me/profile", patch(users_me::update_profile))
+        .route(
+            "/api/users/me/identities",
+            get(users_me::list_identities),
+        )
+        .route(
+            "/api/users/me/identities/{provider}",
+            delete(users_me::unbind_identity),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

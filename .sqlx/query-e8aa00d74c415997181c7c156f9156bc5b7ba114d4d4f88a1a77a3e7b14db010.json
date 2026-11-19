@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, created_at, updated_at\n               FROM users\n               WHERE ($1::text IS NULL OR email_key LIKE $1 OR username_key LIKE $1)\n               ORDER BY created_at DESC\n               LIMIT $2 OFFSET $3",
+  "query": "INSERT INTO users (id, username, email, password_hash)\n               VALUES ($1, $2, $3, $4)\n               RETURNING id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at",
   "describe": {
     "columns": [
       {
@@ -50,20 +50,41 @@
       },
       {
         "ordinal": 9,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "bio",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "website_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 10,
+        "ordinal": 14,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
+        "Uuid",
         "Text",
-        "Int8",
-        "Int8"
+        "Text",
+        "Text"
       ]
     },
     "nullable": [
@@ -76,9 +97,13 @@
       false,
       false,
       false,
+      true,
+      true,
+      true,
+      true,
       false,
       false
     ]
   },
-  "hash": "94799b3885280c9331c841f263c81e27536724a594111802bc7ec780e4b88dce"
+  "hash": "e8aa00d74c415997181c7c156f9156bc5b7ba114d4d4f88a1a77a3e7b14db010"
 }

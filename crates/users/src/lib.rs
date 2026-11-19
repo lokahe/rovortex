@@ -35,8 +35,10 @@ pub use email_verification::{
     EmailVerificationRepository, NewEmailVerification, VerificationPurpose,
 };
 pub use mail::{MailError, MailSender};
-pub use oauth_identity::{ExternalIdentity, NewExternalIdentity, OauthIdentityRepository};
+pub use oauth_identity::{
+    ExternalIdentity, ExternalProfile, NewExternalIdentity, OauthIdentityRepository,
+};
 pub use rate_limit::{LoginGuard, guard_key};
 pub use refresh_token::{NewRefreshToken, RefreshTokenRepository};
 pub use repository::UserRepository;
-pub use service::UserService;
+pub use service::{ProfilePatch, UserService};

@@ -20,6 +20,7 @@ mod row {
         pub provider: String,
         pub provider_uid: String,
         pub email: Option<String>,
+        pub raw_profile: Option<sqlx::types::Json<serde_json::Value>>,
         pub created_at: DateTime<Utc>,
     }
 }
@@ -31,6 +32,7 @@ fn into_identity(r: row::IdentityRow) -> ExternalIdentity {
         provider: r.provider,
         provider_uid: r.provider_uid,
         email: r.email,
+        raw_profile: r.raw_profile.map(|j| j.0),
         created_at: r.created_at,
     }
 }
@@ -45,9 +47,6 @@ impl PgOauthIdentityRepository {
     }
 }
 
-const COLUMNS: &str =
-    "id, user_id, provider, provider_uid, email, created_at";
-
 #[async_trait]
 impl OauthIdentityRepository for PgOauthIdentityRepository {
     async fn find_by_external(
@@ -57,7 +56,7 @@ impl OauthIdentityRepository for PgOauthIdentityRepository {
     ) -> Result<Option<ExternalIdentity>, UserError> {
         let row = sqlx::query_as!(
             row::IdentityRow,
-            r#"SELECT id, user_id, provider, provider_uid, email, created_at FROM user_identities WHERE provider = $1 AND provider_uid = $2"#,
+            r#"SELECT id, user_id, provider, provider_uid, email, raw_profile AS "raw_profile: _", created_at FROM user_identities WHERE provider = $1 AND provider_uid = $2"#,
             provider,
             provider_uid,
         )
@@ -73,14 +72,15 @@ impl OauthIdentityRepository for PgOauthIdentityRepository {
     ) -> Result<ExternalIdentity, UserError> {
         let row = sqlx::query_as!(
             row::IdentityRow,
-            r#"INSERT INTO user_identities (id, user_id, provider, provider_uid, email)
-               VALUES ($1, $2, $3, $4, $5)
-               RETURNING id, user_id, provider, provider_uid, email, created_at"#,
+            r#"INSERT INTO user_identities (id, user_id, provider, provider_uid, email, raw_profile)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               RETURNING id, user_id, provider, provider_uid, email, raw_profile AS "raw_profile: _", created_at"#,
             Uuid::now_v7(),
             identity.user_id,
             identity.provider,
             identity.provider_uid,
             identity.email,
+            identity.raw_profile,
         )
         .fetch_one(&self.pool)
         .await
@@ -91,7 +91,7 @@ impl OauthIdentityRepository for PgOauthIdentityRepository {
     async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<ExternalIdentity>, UserError> {
         let rows = sqlx::query_as!(
             row::IdentityRow,
-            r#"SELECT id, user_id, provider, provider_uid, email, created_at FROM user_identities WHERE user_id = $1 ORDER BY created_at"#,
+            r#"SELECT id, user_id, provider, provider_uid, email, raw_profile AS "raw_profile: _", created_at FROM user_identities WHERE user_id = $1 ORDER BY created_at"#,
             user_id,
         )
         .fetch_all(&self.pool)
@@ -105,6 +105,25 @@ impl OauthIdentityRepository for PgOauthIdentityRepository {
             r#"DELETE FROM user_identities WHERE user_id = $1 AND provider = $2"#,
             user_id,
             provider,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| UserError::Hashing(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn update_raw_profile(
+        &self,
+        user_id: Uuid,
+        provider: &str,
+        raw: Option<serde_json::Value>,
+    ) -> Result<(), UserError> {
+        sqlx::query!(
+            r#"UPDATE user_identities SET raw_profile = $3
+               WHERE user_id = $1 AND provider = $2"#,
+            user_id,
+            provider,
+            raw,
         )
         .execute(&self.pool)
         .await

@@ -20,6 +20,14 @@ pub struct User {
     pub is_admin: bool,
     /// 账号状态：0=正常，1=封禁（users.status SMALLINT）。
     pub status: i16,
+    /// 展示名（None = 前端 fallback username）。
+    pub display_name: Option<String>,
+    /// 头像 URL（None = 前端默认头像）。
+    pub avatar_url: Option<String>,
+    /// 简介（业务层限制 <= 280 字符）。
+    pub bio: Option<String>,
+    /// 个人主页（业务层校验 http(s):// 开头）。
+    pub website_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

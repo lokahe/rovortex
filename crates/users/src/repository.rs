@@ -52,6 +52,14 @@ pub trait UserRepository: Send + Sync {
     /// 用户名冲突由数据库唯一索引兜底。
     async fn update_username(&self, id: uuid::Uuid, new_username: &str) -> Result<(), UserError>;
 
+    /// 部分更新展示资料（PATCH 语义）：只更新 patch 中 Some 的字段，
+    /// `Some(None)` 表示清空该字段。实现必须更新 updated_at。
+    async fn update_profile(
+        &self,
+        id: uuid::Uuid,
+        patch: &crate::service::ProfilePatch,
+    ) -> Result<(), UserError>;
+
     /// 查询用户是否为管理员（admin API 每请求实时校验，撤销立即生效）。
     async fn is_admin(&self, id: uuid::Uuid) -> Result<bool, UserError>;
 

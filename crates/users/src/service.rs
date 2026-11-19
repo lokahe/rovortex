@@ -12,7 +12,9 @@ use crate::email_verification::{
     EmailVerificationRepository, NewEmailVerification, VerificationPurpose,
 };
 use crate::mail::MailSender;
-use crate::oauth_identity::{NewExternalIdentity, OauthIdentityRepository};
+use crate::oauth_identity::{
+    ExternalIdentity, ExternalProfile, NewExternalIdentity, OauthIdentityRepository,
+};
 use crate::password::{hash_password, verify_password};
 use crate::rate_limit::LoginGuard;
 use crate::refresh_token::{NewRefreshToken, RefreshTokenRepository};
@@ -31,6 +33,16 @@ pub struct Session {
     /// 明文 refresh token：仅在签发瞬间存在，此后只存哈希。
     pub refresh_token: String,
     pub refresh_expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 展示资料的部分更新（PATCH 语义）：
+/// `None` = 不动，`Some(Some(v))` = 更新为 v，`Some(None)` = 清空。
+#[derive(Debug, Clone, Default)]
+pub struct ProfilePatch {
+    pub display_name: Option<Option<String>>,
+    pub avatar_url: Option<Option<String>>,
+    pub bio: Option<Option<String>>,
+    pub website_url: Option<Option<String>>,
 }
 
 /// 用户业务服务。持有仓储抽象，具体实现在组合根注入。
@@ -118,7 +130,7 @@ impl UserService {
             AuditAction::Register,
             format!("username={username}"),
             client_ip,
-        );
+        ).await;
         self.issue_session(user).await
     }
 
@@ -127,7 +139,7 @@ impl UserService {
     /// 安全设计：无论“用户不存在”还是“密码错误”，一律返回 [`UserError::InvalidCredentials`]，
     /// 避免账号枚举攻击。
     /// 写审计：失败只记日志，绝不阻断业务主流程。
-    fn audit(
+    async fn audit(
         &self,
         user_id: Option<Uuid>,
         action: AuditAction,
@@ -140,12 +152,11 @@ impl UserService {
             detail: detail.into(),
             client_ip: client_ip.to_string(),
         };
-        let audit = self.audit.clone();
-        tokio::spawn(async move {
-            if let Err(e) = audit.append(entry).await {
-                tracing::warn!(error = %e, "failed to append audit log");
-            }
-        });
+        // 直接 await（不 spawn）：业务层不持有 runtime 特性依赖；
+        // 审计仓储实现均为低延迟写（PG 单条 INSERT / 内存 Vec），可接受。
+        if let Err(e) = self.audit.append(entry).await {
+            tracing::warn!(error = %e, "failed to append audit log");
+        }
     }
 
     /// 登录：限流检查 → 查用户 → 验密码 → 签会话。
@@ -162,17 +173,17 @@ impl UserService {
                     AuditAction::LoginSuccess,
                     format!("login={login}"),
                     client_ip,
-                );
+                ).await;
                 self.login_guard.record_success(guard_key).await
             }
             Err(UserError::InvalidCredentials) => {
-                self.audit(None, AuditAction::LoginFailure, format!("login={login}"), client_ip);
+                self.audit(None, AuditAction::LoginFailure, format!("login={login}"), client_ip).await;
                 self.login_guard.record_failure(guard_key).await
             }
             // 用户不存在也计入失败（防枚举语义下这同样是 InvalidCredentials，
             // 但防御性处理：其他错误不计入）
             Err(UserError::UserNotFound) => {
-                self.audit(None, AuditAction::LoginFailure, format!("login={login}"), client_ip);
+                self.audit(None, AuditAction::LoginFailure, format!("login={login}"), client_ip).await;
                 self.login_guard.record_failure(guard_key).await
             }
             Err(_) => {}
@@ -202,7 +213,7 @@ impl UserService {
         let token_hash = hash_refresh_token(raw_token);
         let result = self.refresh_inner(&token_hash, client_ip).await;
         if result.is_err() {
-            self.audit(None, AuditAction::RefreshFailure, "invalid refresh token", client_ip);
+            self.audit(None, AuditAction::RefreshFailure, "invalid refresh token", client_ip).await;
         }
         result
     }
@@ -220,7 +231,7 @@ impl UserService {
             .find_by_id(user_id)
             .await?
             .ok_or(UserError::UserNotFound)?;
-        self.audit(Some(user.id), AuditAction::RefreshSuccess, "", client_ip);
+        self.audit(Some(user.id), AuditAction::RefreshSuccess, "", client_ip).await;
         self.issue_session(user).await
     }
 
@@ -233,7 +244,7 @@ impl UserService {
             .find_active_by_hash(&hash)
             .await?
             .map(|(uid, _)| uid);
-        self.audit(owner, AuditAction::Logout, "", client_ip);
+        self.audit(owner, AuditAction::Logout, "", client_ip).await;
         self.refresh.revoke_by_hash(&hash).await
     }
 
@@ -257,7 +268,7 @@ impl UserService {
             return Err(UserError::InvalidCredentials);
         };
         if !verify_password(old_password, old_hash) {
-            self.audit(Some(user_id), AuditAction::LoginFailure, "change_password: old password mismatch", client_ip);
+            self.audit(Some(user_id), AuditAction::LoginFailure, "change_password: old password mismatch", client_ip).await;
             return Err(UserError::InvalidCredentials);
         }
         let new_hash = hash_password(new_password)?;
@@ -265,7 +276,7 @@ impl UserService {
             .update_password_hash(user_id, &new_hash)
             .await?;
         self.refresh.revoke_all_for_user(user_id).await?;
-        self.audit(Some(user_id), AuditAction::PasswordChanged, "", client_ip);
+        self.audit(Some(user_id), AuditAction::PasswordChanged, "", client_ip).await;
         Ok(())
     }
 
@@ -280,21 +291,35 @@ impl UserService {
         provider: &str,
         provider_uid: &str,
         email: Option<&str>,
+        profile: Option<&ExternalProfile>,
         client_ip: &str,
     ) -> Result<Session, UserError> {
-        // 1. 已绑定：直接登录
+        // 1. 已绑定：直接登录（顺带刷新平台原始资料缓存）
         if let Some(identity) = self.identities.find_by_external(provider, provider_uid).await? {
             let user = self
                 .repo
                 .find_by_id(identity.user_id)
                 .await?
                 .ok_or(UserError::UserNotFound)?;
+            if let Some(p) = profile
+                && p.raw.is_some()
+            {
+                self.identities
+                    .update_raw_profile(user.id, provider, p.raw.clone())
+                    .await?;
+            }
+            self.backfill_profile(user.id, profile).await?;
             self.audit(
                 Some(user.id),
                 AuditAction::LoginSuccess,
                 format!("provider={provider}"),
                 client_ip,
-            );
+            ).await;
+            let user = self
+                .repo
+                .find_by_id(user.id)
+                .await?
+                .ok_or(UserError::UserNotFound)?;
             return self.issue_session(user).await;
         }
 
@@ -313,13 +338,18 @@ impl UserService {
                         provider: provider.into(),
                         provider_uid: provider_uid.into(),
                         email: Some(email.into()),
+                        raw_profile: profile.and_then(|p| p.raw.clone()),
                     })
                     .await?;
-                user
+                self.backfill_profile(user.id, profile).await?;
+                self.repo
+                    .find_by_id(user.id)
+                    .await?
+                    .ok_or(UserError::UserNotFound)?
             }
             // 3. 全新用户：自动注册（平台已验证邮箱 → 直接标记 email_verified）
             None => {
-                let username = self.unique_username_from(email).await?;
+                let username = self.unique_username_from(email, profile).await?;
                 let mut user = self
                     .repo
                     .create(NewUser {
@@ -336,15 +366,21 @@ impl UserService {
                         provider: provider.into(),
                         provider_uid: provider_uid.into(),
                         email: Some(email.into()),
+                        raw_profile: profile.and_then(|p| p.raw.clone()),
                     })
                     .await?;
+                // 新用户直接写入资料（首体验最重要）
+                self.backfill_profile(user.id, profile).await?;
                 self.audit(
                     Some(user.id),
                     AuditAction::Register,
                     format!("username={}", user.username),
                     client_ip,
-                );
-                user
+                ).await;
+                self.repo
+                    .find_by_id(user.id)
+                    .await?
+                    .ok_or(UserError::UserNotFound)?
             }
         };
 
@@ -353,12 +389,66 @@ impl UserService {
             AuditAction::LoginSuccess,
             format!("provider={provider}"),
             client_ip,
-        );
+        ).await;
         self.issue_session(user).await
     }
 
+    /// 回填规范资料：users 表该字段为空才写入平台值，非空不覆盖
+    ///（非空即视为用户编辑过）。无 profile 或全空则不动。
+    async fn backfill_profile(
+        &self,
+        user_id: Uuid,
+        profile: Option<&ExternalProfile>,
+    ) -> Result<(), UserError> {
+        let Some(p) = profile else {
+            return Ok(());
+        };
+        let user = match self.repo.find_by_id(user_id).await? {
+            Some(u) => u,
+            None => return Ok(()),
+        };
+        // 空缺才回填：users 字段为 None 时写入平台值；非空即视为用户编辑过，不动
+        let patch = ProfilePatch {
+            display_name: if user.display_name.is_none() { Some(p.display_name.clone()) } else { None },
+            avatar_url: if user.avatar_url.is_none() { Some(p.avatar_url.clone()) } else { None },
+            bio: if user.bio.is_none() { Some(p.bio.clone()) } else { None },
+            website_url: if user.website_url.is_none() { Some(p.website_url.clone()) } else { None },
+        };
+        if patch.display_name.is_some()
+            || patch.avatar_url.is_some()
+            || patch.bio.is_some()
+            || patch.website_url.is_some()
+        {
+            self.repo.update_profile(user_id, &patch).await?;
+        }
+        Ok(())
+    }
+
     /// 从邮箱前缀推导用户名，冲突时追加数字后缀（如 alice → alice2 → alice3）。
-    async fn unique_username_from(&self, email: &str) -> Result<String, UserError> {
+    /// 有平台资料时优先用 display_name / 平台用户名风格字段做候选（需通过校验）。
+    async fn unique_username_from(
+        &self,
+        email: &str,
+        profile: Option<&ExternalProfile>,
+    ) -> Result<String, UserError> {
+        // 平台提供的展示名若合法且未被占用，优先采用（如 github login）
+        if let Some(p) = profile {
+            for candidate_src in [p.display_name.as_deref()] {
+                let Some(src) = candidate_src else { continue };
+                let candidate: String = src
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if candidate.len() < 3 {
+                    continue;
+                }
+                if self.repo.find_by_username(&candidate).await?.is_none()
+                    && validate_username(&candidate).is_ok()
+                {
+                    return Ok(candidate);
+                }
+            }
+        }
         let base: String = email
             .split('@')
             .next()
@@ -403,7 +493,7 @@ impl UserService {
         }
         let new_hash = hash_password(new_password)?;
         self.repo.update_password_hash(user_id, &new_hash).await?;
-        self.audit(Some(user_id), AuditAction::PasswordChanged, "set_password", client_ip);
+        self.audit(Some(user_id), AuditAction::PasswordChanged, "set_password", client_ip).await;
         Ok(())
     }
 
@@ -445,7 +535,7 @@ impl UserService {
                 AuditAction::EmailVerificationRequested,
                 format!("email={email}"),
                 client_ip,
-            );
+            ).await;
             let raw = generate_refresh_token();
             self.email_verifications
                 .insert(NewEmailVerification {
@@ -488,7 +578,7 @@ impl UserService {
             .ok_or(UserError::UserNotFound)?;
         // user_id 在 signup 流程为 None，以邮箱反查为准。
         let _ = user_id;
-        self.audit(Some(user.id), AuditAction::EmailVerified, format!("email={email}"), client_ip);
+        self.audit(Some(user.id), AuditAction::EmailVerified, format!("email={email}"), client_ip).await;
         self.repo.mark_email_verified(user.id).await
     }
 
@@ -518,7 +608,7 @@ impl UserService {
             AuditAction::EmailChangeRequested,
             format!("old={} new={new_email}", user.email),
             client_ip,
-        );
+        ).await;
 
         let raw = generate_refresh_token();
         self.email_verifications
@@ -557,7 +647,7 @@ impl UserService {
         if purpose != VerificationPurpose::EmailChange {
             return Err(UserError::InvalidRefreshToken);
         }
-        self.audit(Some(user_id), AuditAction::EmailChanged, format!("new={email}"), client_ip);
+        self.audit(Some(user_id), AuditAction::EmailChanged, format!("new={email}"), client_ip).await;
         self.repo.update_email(user_id, &email).await
     }
 
@@ -574,7 +664,7 @@ impl UserService {
                 AuditAction::MagicLinkRequested,
                 format!("email={email}"),
                 client_ip,
-            );
+            ).await;
         }
 
         let raw = generate_refresh_token();
@@ -617,12 +707,11 @@ impl UserService {
             return Err(UserError::InvalidRefreshToken);
         }
         // 收件权即身份：能读到邮件 = 邮箱主人 = 平台已验证邮箱
-        self.login_with_identity("magic", &email, Some(&email), client_ip)
+        self.login_with_identity("magic", &email, Some(&email), None, client_ip)
             .await
     }
 
-    /// 忘记密码：给邮箱发重置链接（一次性，15 分钟有效）。
-    ///
+    /// 忘记密码：给邮箱发重置链接（一次性，15 分钟有效）。    ///
     /// 防枚举：未注册邮箱不发信但恒返回 Ok（不泄露注册状态）。
     /// 只对有密码的账号发信——纯 OAuth/Magic 用户无需密码重置。
     /// 发信失败不阻断流程（用户可重发），只记录。
@@ -639,7 +728,7 @@ impl UserService {
             AuditAction::PasswordResetRequested,
             format!("email={email}"),
             client_ip,
-        );
+        ).await;
         let raw = generate_refresh_token();
         self.email_verifications
             .insert(NewEmailVerification {
@@ -687,7 +776,7 @@ impl UserService {
         let new_hash = hash_password(new_password)?;
         self.repo.update_password_hash(user_id, &new_hash).await?;
         self.refresh.revoke_all_for_user(user_id).await?;
-        self.audit(Some(user_id), AuditAction::PasswordChanged, "password_reset", client_ip);
+        self.audit(Some(user_id), AuditAction::PasswordChanged, "password_reset", client_ip).await;
         Ok(())
     }
 
@@ -717,9 +806,94 @@ impl UserService {
             AuditAction::UsernameChanged,
             format!("old={} new={new_username}", user.username),
             client_ip,
-        );
+        ).await;
         Ok(())
     }
+
+    /// 部分更新展示资料（PATCH 语义）。展示字段不参与 token 验证，不吊销会话。
+    pub async fn update_profile(
+        &self,
+        user_id: Uuid,
+        patch: ProfilePatch,
+        client_ip: &str,
+    ) -> Result<User, UserError> {
+        validate_profile_patch(&patch)?;
+        self.repo.find_by_id(user_id).await?.ok_or(UserError::UserNotFound)?;
+        self.repo.update_profile(user_id, &patch).await?;
+        self.audit(Some(user_id), AuditAction::ProfileUpdated, "profile", client_ip).await;
+        self.repo
+            .find_by_id(user_id)
+            .await?
+            .ok_or(UserError::UserNotFound)
+    }
+
+    /// 列出某用户的全部外部身份（设置页「已绑定平台」）。
+    pub async fn list_identities(&self, user_id: Uuid) -> Result<Vec<ExternalIdentity>, UserError> {
+        self.identities.list_for_user(user_id).await
+    }
+
+    /// 解绑外部身份。守门：解绑后必须仍剩至少一种登录方式
+    /// （密码已设或还有其他身份），否则拒绝——防解绑成无法登录的死号。
+    pub async fn unbind_identity(&self, user_id: Uuid, provider: &str, client_ip: &str) -> Result<(), UserError> {
+        self.repo.find_by_id(user_id).await?.ok_or(UserError::UserNotFound)?;
+        let bound = self.identities.list_for_user(user_id).await?;
+        if !bound.iter().any(|i| i.provider == provider) {
+            return Err(UserError::InvalidRefreshToken);
+        }
+        let has_password = self
+            .repo
+            .find_by_id(user_id)
+            .await?
+            .is_some_and(|u| u.password_hash.is_some());
+        let other_identities = bound.iter().any(|i| i.provider != provider);
+        if !has_password && !other_identities {
+            return Err(UserError::Hashing(
+                "cannot unbind the last login method".into(),
+            ));
+        }
+        self.identities.remove(user_id, provider).await?;
+        self.audit(
+            Some(user_id),
+            AuditAction::IdentityUnlinked,
+            format!("provider={provider}"),
+            client_ip,
+        ).await;
+        Ok(())
+    }
+}
+
+/// 展示资料字段校验：长度上限 + URL 格式。仅拦明显非法值，
+/// URL 渲染安全由前端负责（只存 URL 不存 HTML）。
+fn validate_profile_patch(patch: &ProfilePatch) -> Result<(), UserError> {
+    if let Some(Some(display_name)) = &patch.display_name {
+        let len = display_name.chars().count();
+        if !(1..=64).contains(&len) {
+            return Err(UserError::InvalidUsername(
+                "display_name length must be between 1 and 64".into(),
+            ));
+        }
+    }
+    if let Some(Some(bio)) = &patch.bio {
+        let len = bio.chars().count();
+        if !(1..=280).contains(&len) {
+            return Err(UserError::InvalidUsername(
+                "bio length must be between 1 and 280".into(),
+            ));
+        }
+    }
+    for url_field in [&patch.website_url, &patch.avatar_url] {
+        if let Some(Some(url)) = url_field {
+            let len = url.chars().count();
+            if !(8..=256).contains(&len)
+                || !(url.starts_with("http://") || url.starts_with("https://"))
+            {
+                return Err(UserError::InvalidUsername(
+                    "url must start with http(s):// and be at most 256 chars".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 验证邮件 HTML 模板（注册）。
@@ -858,6 +1032,10 @@ mod tests {
                 email_verified: false,
                 is_admin: false,
                 status: 0,
+                display_name: None,
+                avatar_url: None,
+                bio: None,
+                website_url: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             };
@@ -972,6 +1150,25 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(username_key, id);
+            Ok(())
+        }
+
+        async fn update_profile(&self, id: Uuid, patch: &ProfilePatch) -> Result<(), UserError> {
+            let mut store = self.store.lock().unwrap();
+            let user = store.get_mut(&id).ok_or(UserError::UserNotFound)?;
+            if let Some(v) = patch.display_name.clone() {
+                user.display_name = v;
+            }
+            if let Some(v) = patch.avatar_url.clone() {
+                user.avatar_url = v;
+            }
+            if let Some(v) = patch.bio.clone() {
+                user.bio = v;
+            }
+            if let Some(v) = patch.website_url.clone() {
+                user.website_url = v;
+            }
+            user.updated_at = Utc::now();
             Ok(())
         }
 
@@ -1186,7 +1383,8 @@ mod tests {
     /// 测试用外部身份仓储桩。
     #[derive(Default)]
     struct TestIdentityRepository {
-        identities: Mutex<Vec<(Uuid, String, String)>>,
+        /// (user_id, provider, provider_uid, raw_profile)
+        identities: Mutex<Vec<(Uuid, String, String, Option<serde_json::Value>)>>,
     }
 
     impl TestIdentityRepository {
@@ -1205,13 +1403,14 @@ mod tests {
             let list = self.identities.lock().unwrap();
             Ok(list
                 .iter()
-                .find(|(_, p, u)| p == provider && u == provider_uid)
-                .map(|(uid, p, u)| ExternalIdentity {
+                .find(|(_, p, u, _)| p == provider && u == provider_uid)
+                .map(|(uid, p, u, raw)| ExternalIdentity {
                     id: Uuid::now_v7(),
                     user_id: *uid,
                     provider: p.clone(),
                     provider_uid: u.clone(),
                     email: None,
+                    raw_profile: raw.clone(),
                     created_at: Utc::now(),
                 }))
         }
@@ -1223,7 +1422,7 @@ mod tests {
             let mut list = self.identities.lock().unwrap();
             let exists = list
                 .iter()
-                .any(|(_, p, u)| *p == identity.provider && *u == identity.provider_uid);
+                .any(|(_, p, u, _)| *p == identity.provider && *u == identity.provider_uid);
             if exists {
                 return Err(UserError::Hashing("identity already bound".into()));
             }
@@ -1233,12 +1432,14 @@ mod tests {
                 provider: identity.provider,
                 provider_uid: identity.provider_uid,
                 email: identity.email,
+                raw_profile: identity.raw_profile,
                 created_at: Utc::now(),
             };
             list.push((
                 created.user_id,
                 created.provider.clone(),
                 created.provider_uid.clone(),
+                created.raw_profile.clone(),
             ));
             Ok(created)
         }
@@ -1250,13 +1451,14 @@ mod tests {
             let list = self.identities.lock().unwrap();
             Ok(list
                 .iter()
-                .filter(|(uid, _, _)| *uid == user_id)
-                .map(|(_, p, u)| ExternalIdentity {
+                .filter(|(uid, _, _, _)| *uid == user_id)
+                .map(|(_, p, u, raw)| ExternalIdentity {
                     id: Uuid::now_v7(),
                     user_id,
                     provider: p.clone(),
                     provider_uid: u.clone(),
                     email: None,
+                    raw_profile: raw.clone(),
                     created_at: Utc::now(),
                 })
                 .collect())
@@ -1266,7 +1468,25 @@ mod tests {
             self.identities
                 .lock()
                 .unwrap()
-                .retain(|(uid, p, _)| !(*uid == user_id && p == provider));
+                .retain(|(uid, p, _, _)| !(*uid == user_id && p == provider));
+            Ok(())
+        }
+
+        async fn update_raw_profile(
+            &self,
+            user_id: Uuid,
+            provider: &str,
+            raw: Option<serde_json::Value>,
+        ) -> Result<(), UserError> {
+            let mut list = self.identities.lock().unwrap();
+            for (uid, p, _, stored) in list.iter_mut() {
+                if *uid == user_id && p == provider {
+                    if raw.is_some() {
+                        *stored = raw;
+                    }
+                    break;
+                }
+            }
             Ok(())
         }
     }
@@ -1662,7 +1882,7 @@ mod tests {
     async fn oauth_new_user_auto_registers_and_logs_in() {
         let svc = service();
         let s1 = svc
-            .login_with_identity("github", "10001", Some("nina@example.com"), "5.5.5.5")
+            .login_with_identity("github", "10001", Some("nina@example.com"), None, "5.5.5.5")
             .await
             .unwrap();
         assert_eq!(s1.user.email, "nina@example.com");
@@ -1674,7 +1894,7 @@ mod tests {
 
         // 二次登录：同身份直接登录既有账号（不新建用户、身份不重复绑定）
         let s2 = svc
-            .login_with_identity("github", "10001", Some("nina@example.com"), "5.5.5.5")
+            .login_with_identity("github", "10001", Some("nina@example.com"), None, "5.5.5.5")
             .await
             .unwrap();
         assert_eq!(s2.user.id, s1.user.id);
@@ -1690,7 +1910,7 @@ mod tests {
             .unwrap();
         // GitHub 身份首次登录：同邮箱 → 挂到既有账号
         let s = svc
-            .login_with_identity("github", "20002", Some("oscar@example.com"), "5.5.5.5")
+            .login_with_identity("github", "20002", Some("oscar@example.com"), None, "5.5.5.5")
             .await
             .unwrap();
         assert_eq!(s.user.id, password_user.user.id, "merge not duplicate");
@@ -1713,7 +1933,7 @@ mod tests {
             .unwrap();
         // GitHub 邮箱前缀同为 nina → 自动去重为 nina2
         let s = svc
-            .login_with_identity("github", "30003", Some("nina@example.com"), "5.5.5.5")
+            .login_with_identity("github", "30003", Some("nina@example.com"), None, "5.5.5.5")
             .await
             .unwrap();
         assert_eq!(s.user.username, "nina2");
@@ -1723,7 +1943,7 @@ mod tests {
     async fn passwordless_account_rejects_password_login_and_can_set_password() {
         let svc = service();
         let s = svc
-            .login_with_identity("github", "40004", Some("pia@example.com"), "5.5.5.5")
+            .login_with_identity("github", "40004", Some("pia@example.com"), None, "5.5.5.5")
             .await
             .unwrap();
 
@@ -1879,6 +2099,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_profile_backfill_no_overwrite_and_raw_refresh() {
+        let svc = service();
+        let p = ExternalProfile {
+            display_name: Some("Nina".into()),
+            avatar_url: Some("https://avatars.example.com/nina.png".into()),
+            bio: Some("hello".into()),
+            website_url: Some("https://nina.dev".into()),
+            raw: Some(serde_json::json!({"login": "nina"})),
+        };
+        let s = svc
+            .login_with_identity("github", "60006", Some("nina-p@example.com"), Some(&p), "5.5.5.5")
+            .await
+            .unwrap();
+
+        // 新用户：资料直接写入 + raw 缓存落库
+        assert_eq!(s.user.display_name.as_deref(), Some("Nina"));
+        assert_eq!(s.user.avatar_url.as_deref(), Some("https://avatars.example.com/nina.png"));
+        let ids = svc.list_identities(s.user.id).await.unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].raw_profile.as_ref().and_then(|r| r.get("login")).and_then(|v| v.as_str()), Some("nina"));
+
+        // 用户本地编辑 display_name
+        svc.update_profile(
+            s.user.id,
+            ProfilePatch { display_name: Some(Some("Nina Local".into())), ..Default::default() },
+            "5.5.5.5",
+        )
+        .await
+        .unwrap();
+
+        // 再次登录（平台资料变化）：规范字段不覆盖，raw 刷新
+        let p2 = ExternalProfile {
+            display_name: Some("Nina Renamed On Github".into()),
+            avatar_url: Some("https://avatars.example.com/new.png".into()),
+            bio: None,
+            website_url: None,
+            raw: Some(serde_json::json!({"login": "nina", "updated": true})),
+        };
+        let s2 = svc
+            .login_with_identity("github", "60006", Some("nina-p@example.com"), Some(&p2), "5.5.5.5")
+            .await
+            .unwrap();
+        assert_eq!(s2.user.display_name.as_deref(), Some("Nina Local"), "local edit wins");
+        assert_eq!(s2.user.avatar_url.as_deref(), Some("https://avatars.example.com/nina.png"), "non-empty not overwritten");
+        let ids = svc.list_identities(s.user.id).await.unwrap();
+        assert_eq!(
+            ids[0].raw_profile.as_ref().and_then(|r| r.get("updated")).is_some(),
+            true,
+            "raw refreshed on login"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_profile_patch_semantics_and_validation() {
+        let svc = service();
+        let s = svc
+            .register("quinn", "quinn@example.com", "Str0ng-pass!", "9.9.9.9")
+            .await
+            .unwrap();
+
+        // PATCH：只动传了的字段
+        let u = svc
+            .update_profile(
+                s.user.id,
+                ProfilePatch { bio: Some(Some("rust & android".into())), ..Default::default() },
+                "9.9.9.9",
+            )
+            .await
+            .unwrap();
+        assert_eq!(u.bio.as_deref(), Some("rust & android"));
+        assert_eq!(u.display_name, None);
+
+        // Some(None) 清空
+        let u = svc
+            .update_profile(
+                s.user.id,
+                ProfilePatch { bio: Some(None), ..Default::default() },
+                "9.9.9.9",
+            )
+            .await
+            .unwrap();
+        assert_eq!(u.bio, None);
+
+        // 校验：bio 超长、url 非法
+        assert!(svc
+            .update_profile(
+                s.user.id,
+                ProfilePatch { bio: Some(Some("x".repeat(281).into())), ..Default::default() },
+                "9.9.9.9",
+            )
+            .await
+            .is_err());
+        assert!(svc
+            .update_profile(
+                s.user.id,
+                ProfilePatch { website_url: Some(Some("javascript:alert(1)".into())), ..Default::default() },
+                "9.9.9.9",
+            )
+            .await
+            .is_err());
+
+        // 未登录其他用户不可达（UserNotFound 语义由调用方保证，这里只验证不 panic）
+        assert!(svc
+            .update_profile(
+                Uuid::now_v7(),
+                ProfilePatch { bio: Some(Some("hi".into())), ..Default::default() },
+                "9.9.9.9",
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn unbind_identity_guard_and_success() {
+        let svc = service();
+        // 纯 OAuth 用户（无密码，仅一个身份）：解绑被拒
+        let s = svc
+            .login_with_identity("github", "70007", Some("raul@example.com"), None, "5.5.5.5")
+            .await
+            .unwrap();
+        assert!(matches!(
+            svc.unbind_identity(s.user.id, "github", "5.5.5.5").await,
+            Err(UserError::Hashing(_))
+        ));
+
+        // 设密码后可解绑
+        svc.set_password(s.user.id, "N3w-pass-word!", "5.5.5.5").await.unwrap();
+        svc.unbind_identity(s.user.id, "github", "5.5.5.5").await.unwrap();
+        assert!(svc.list_identities(s.user.id).await.unwrap().is_empty());
+
+        // 解绑不存在的 provider：拒绝
+        let s2 = svc
+            .login_with_identity("github", "70008", Some("sara@example.com"), None, "5.5.5.5")
+            .await
+            .unwrap();
+        assert!(svc.unbind_identity(s2.user.id, "google", "5.5.5.5").await.is_err());
+
+        // 两个身份无密码：解绑其一允许
+        let _ = svc
+            .login_with_identity("google", "80008", Some("sara@example.com"), None, "5.5.5.5")
+            .await
+            .unwrap();
+        assert_eq!(svc.list_identities(s2.user.id).await.unwrap().len(), 2);
+        svc.unbind_identity(s2.user.id, "github", "5.5.5.5").await.unwrap();
+        assert_eq!(svc.list_identities(s2.user.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn password_reset_anti_enumeration_and_cross_purpose() {
         let (svc, sent) = service_with_mail(TestMailSender::default());
 
@@ -1888,7 +2256,7 @@ mod tests {
 
         // 无密码账号（纯 OAuth）：恒 Ok 且不发信
         let _ = svc
-            .login_with_identity("github", "50005", Some("nora@example.com"), "6.6.6.6")
+            .login_with_identity("github", "50005", Some("nora@example.com"), None, "6.6.6.6")
             .await
             .unwrap();
         svc.request_password_reset("nora@example.com", "6.6.6.6").await.unwrap();

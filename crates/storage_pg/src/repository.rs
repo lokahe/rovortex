@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use rovortex_users::{NewUser, User, UserError, UserRepository};
+use rovortex_users::{NewUser, ProfilePatch, User, UserError, UserRepository};
 
 /// 将 sqlx 错误映射为领域错误：唯一约束冲突对应 UsernameTaken / EmailTaken。
 fn map_sqlx_err(e: sqlx::Error, kind: fn(String) -> UserError) -> UserError {
@@ -46,6 +46,10 @@ mod row {
         pub status: i16,
         pub email_verified: bool,
         pub is_admin: bool,
+        pub display_name: Option<String>,
+        pub avatar_url: Option<String>,
+        pub bio: Option<String>,
+        pub website_url: Option<String>,
         pub created_at: DateTime<Utc>,
         pub updated_at: DateTime<Utc>,
     }
@@ -70,6 +74,10 @@ fn into_user(r: row::UserRow) -> User {
         email_verified: r.email_verified,
         is_admin: r.is_admin,
         status: r.status,
+        display_name: r.display_name,
+        avatar_url: r.avatar_url,
+        bio: r.bio,
+        website_url: r.website_url,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }
@@ -82,7 +90,7 @@ impl UserRepository for PgUserRepository {
             row::UserRow,
             r#"INSERT INTO users (id, username, email, password_hash)
                VALUES ($1, $2, $3, $4)
-               RETURNING id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, created_at, updated_at"#,
+               RETURNING id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at"#,
             Uuid::now_v7(),
             new_user.username,
             new_user.email,
@@ -98,7 +106,7 @@ impl UserRepository for PgUserRepository {
     async fn find_by_username(&self, username: &str) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at
                FROM users WHERE username_key = $1"#,
             username.to_lowercase(),
         )
@@ -112,7 +120,7 @@ impl UserRepository for PgUserRepository {
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at
                FROM users WHERE email_key = $1"#,
             email.to_lowercase(),
         )
@@ -126,7 +134,7 @@ impl UserRepository for PgUserRepository {
     async fn find_by_login(&self, login: &str) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at
                FROM users WHERE username_key = $1 OR email_key = $1"#,
             login.to_lowercase(),
         )
@@ -140,7 +148,7 @@ impl UserRepository for PgUserRepository {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, UserError> {
         let row = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at
                FROM users WHERE id = $1"#,
             id,
         )
@@ -198,6 +206,35 @@ impl UserRepository for PgUserRepository {
         Ok(())
     }
 
+    async fn update_profile(
+        &self,
+        id: Uuid,
+        patch: &ProfilePatch,
+    ) -> Result<(), UserError> {
+        sqlx::query!(
+            r#"UPDATE users SET
+                 display_name = CASE WHEN $2::bool THEN $3 ELSE display_name END,
+                 avatar_url   = CASE WHEN $4::bool THEN $5 ELSE avatar_url END,
+                 bio          = CASE WHEN $6::bool THEN $7 ELSE bio END,
+                 website_url  = CASE WHEN $8::bool THEN $9 ELSE website_url END,
+                 updated_at   = now()
+               WHERE id = $1"#,
+            id,
+            patch.display_name.is_some(),
+            patch.display_name.clone().flatten(),
+            patch.avatar_url.is_some(),
+            patch.avatar_url.clone().flatten(),
+            patch.bio.is_some(),
+            patch.bio.clone().flatten(),
+            patch.website_url.is_some(),
+            patch.website_url.clone().flatten(),
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
+        Ok(())
+    }
+
     async fn is_admin(&self, id: Uuid) -> Result<bool, UserError> {
         let row =
             sqlx::query!(r#"SELECT is_admin AS "is_admin: bool" FROM users WHERE id = $1"#, id)
@@ -216,7 +253,7 @@ impl UserRepository for PgUserRepository {
         let pattern = q.map(|s| format!("%{}%", s.to_lowercase()));
         let rows = sqlx::query_as!(
             row::UserRow,
-            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, created_at, updated_at
+            r#"SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, created_at, updated_at
                FROM users
                WHERE ($1::text IS NULL OR email_key LIKE $1 OR username_key LIKE $1)
                ORDER BY created_at DESC

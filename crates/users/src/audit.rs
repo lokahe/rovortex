@@ -22,6 +22,8 @@ pub enum AuditAction {
     MagicLinkRequested,
     PasswordResetRequested,
     UsernameChanged,
+    ProfileUpdated,
+    IdentityUnlinked,
     AdminForceLogout,
 }
 
@@ -42,6 +44,8 @@ impl AuditAction {
             AuditAction::MagicLinkRequested => "magic_link_requested",
             AuditAction::PasswordResetRequested => "password_reset_requested",
             AuditAction::UsernameChanged => "username_changed",
+            AuditAction::ProfileUpdated => "profile_updated",
+            AuditAction::IdentityUnlinked => "identity_unlinked",
             AuditAction::AdminForceLogout => "admin_force_logout",
         }
     }
