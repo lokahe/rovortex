@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/users", get(admin::list_users))
         .route("/api/admin/users/{id}", get(admin::user_detail))
         .route("/api/admin/users/{id}/ban", put(admin::set_ban))
+        .route("/api/admin/users/{id}/force-logout", post(admin::force_logout))
         .route("/api/admin/stats", get(admin::stats))
         .route("/api/admin/db/tables", get(db::list_tables))
         .route("/api/admin/db/tables/{table}", get(db::browse))

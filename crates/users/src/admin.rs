@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::audit::AuditRepository;
+use crate::audit::{AuditAction, AuditRepository};
 use crate::domain::{User, UserError};
 use crate::oauth_identity::OauthIdentityRepository;
 use crate::refresh_token::RefreshTokenRepository;
@@ -134,5 +134,29 @@ impl AdminService {
             total_users,
             events,
         })
+    }
+
+    /// 强制下线：吊销目标用户全部会话并记审计（审计需要 admin 的 user_id）。
+    pub async fn revoke_user_sessions(
+        &self,
+        admin_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<u64, UserError> {
+        self.repo
+            .find_by_id(user_id)
+            .await?
+            .ok_or(UserError::UserNotFound)?;
+        let revoked = self.refresh.revoke_all_for_user(user_id).await?;
+        let entry = crate::audit::NewAuditLog {
+            user_id: Some(user_id),
+            action: AuditAction::AdminForceLogout,
+            detail: format!("revoked={revoked}"),
+            client_ip: String::new(),
+        };
+        if let Err(e) = self.audit.append(entry).await {
+            tracing::warn!(error = %e, "failed to append audit log");
+        }
+        tracing::info!(admin_id = %admin_id, user_id = %user_id, revoked, "admin force logout");
+        Ok(revoked)
     }
 }

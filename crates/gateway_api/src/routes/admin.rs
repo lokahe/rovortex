@@ -159,6 +159,28 @@ pub async fn set_ban(
 }
 
 #[derive(Debug, Serialize)]
+pub struct ForceLogoutResponse {
+    pub revoked: u64,
+}
+
+/// POST /api/admin/users/:id/force-logout —— 强制下线（吊销全部会话）。
+pub async fn force_logout(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<ForceLogoutResponse>, ApiError> {
+    if user_id == admin.user_id {
+        return Err(ApiError::bad_request("cannot force-logout yourself".into()));
+    }
+    let revoked = state
+        .admin
+        .revoke_user_sessions(admin.user_id, user_id)
+        .await
+        .map_err(|_| ApiError::not_found())?;
+    Ok(Json(ForceLogoutResponse { revoked }))
+}
+
+#[derive(Debug, Serialize)]
 pub struct StatsResponse {
     /// 时间窗口起点（now - 7 天）。
     pub since: DateTime<Utc>,
