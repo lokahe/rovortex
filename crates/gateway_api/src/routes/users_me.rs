@@ -1,6 +1,7 @@
 //! 受保护的用户接口：要求有效的 Bearer token。
 
 use axum::Json;
+use axum::http::StatusCode;
 use axum::extract::{ConnectInfo, Path, State};
 use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
@@ -197,6 +198,53 @@ pub async fn list_identities(
             })
             .collect(),
     ))
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionResponse {
+    pub id: Uuid,
+    pub device_label: Option<String>,
+    pub ua: Option<String>,
+    pub ip: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// GET /api/users/me/sessions —— 200 OK（有效会话/设备列表，倒序）
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<Vec<SessionResponse>>, ApiError> {
+    let sessions = state.users.list_sessions(auth.user_id).await?;
+    Ok(Json(
+        sessions
+            .into_iter()
+            .map(|s| SessionResponse {
+                id: s.id,
+                device_label: s.device_label,
+                ua: s.ua,
+                ip: s.ip,
+                created_at: s.created_at,
+                expires_at: s.expires_at,
+            })
+            .collect(),
+    ))
+}
+
+/// DELETE /api/users/me/sessions/{id} —— 204 No Content（踢掉指定设备）
+pub async fn revoke_session(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    Path(session_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let ip = client_ip(&headers, addr);
+    state
+        .users
+        .revoke_session(auth.user_id, session_id, &ip)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// DELETE /api/users/me/identities/{provider} —— 204 No Content（解绑）

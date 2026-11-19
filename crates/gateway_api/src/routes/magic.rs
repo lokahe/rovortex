@@ -51,7 +51,8 @@ pub async fn verify_magic_link(
     axum::extract::Query(query): axum::extract::Query<VerifyQuery>,
 ) -> Result<Json<crate::routes::users::AuthResponse>, ApiError> {
     let ip = client_ip(&headers, addr);
-    let session = state.users.verify_magic_link(&query.token, &ip).await?;
+    let ctx = crate::routes::users::session_context(&headers, addr);
+    let session = state.users.verify_magic_link(&query.token, &ip, &ctx).await?;
     let auth = auth_response(
         &state.tokens,
         session.user,

@@ -2,10 +2,11 @@
 //!
 //! 协议细节只住本模块；业务层只见 `(provider, provider_uid, email)` 三元组。
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
+use std::net::SocketAddr;
 use rovortex_users::ExternalProfile;
 use serde::Deserialize;
 
@@ -70,6 +71,7 @@ pub struct CallbackQuery {
 pub async fn github_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     axum::extract::Query(query): axum::extract::Query<CallbackQuery>,
 ) -> Result<Response, ApiError> {
     let config = state
@@ -129,6 +131,7 @@ pub async fn github_callback(
             email.as_deref(),
             Some(&profile),
             "oauth",
+            &crate::routes::users::session_context(&headers, addr),
         )
         .await?;
 

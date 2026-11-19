@@ -17,7 +17,7 @@ use crate::oauth_identity::{
 };
 use crate::password::{hash_password, verify_password};
 use crate::rate_limit::LoginGuard;
-use crate::refresh_token::{NewRefreshToken, RefreshTokenRepository};
+use crate::refresh_token::{NewRefreshToken, RefreshTokenRepository, SessionView};
 use crate::repository::UserRepository;
 
 const REFRESH_TTL_DAYS: i64 = 30;
@@ -33,6 +33,17 @@ pub struct Session {
     /// 明文 refresh token：仅在签发瞬间存在，此后只存哈希。
     pub refresh_token: String,
     pub refresh_expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 会话签发时的设备上下文（表现层解析好传入）。
+///
+/// 隐私边界：`ua` 只存解析结果（如 "Chrome 130 · Windows"），不存原始 UA 串；
+/// `ip` 只存粗粒度段（IP 前两段），完整 IP 仅进访问日志。
+#[derive(Debug, Clone, Default)]
+pub struct SessionContext {
+    pub device_label: Option<String>,
+    pub ua: Option<String>,
+    pub ip: Option<String>,
 }
 
 /// 展示资料的部分更新（PATCH 语义）：
@@ -103,6 +114,7 @@ impl UserService {
         email: &str,
         password: &str,
         client_ip: &str,
+        ctx: &SessionContext,
     ) -> Result<Session, UserError> {
         validate_username(username)?;
         validate_email(email)?;
@@ -131,7 +143,7 @@ impl UserService {
             format!("username={username}"),
             client_ip,
         ).await;
-        self.issue_session(user).await
+        self.issue_session(user, ctx).await
     }
 
     /// 登录：支持用户名或邮箱。
@@ -163,9 +175,16 @@ impl UserService {
     ///
     /// `guard_key` 由表现层按 (client_ip, login) 生成后传入；
     /// 锁定中的尝试直接拒绝，不消耗 Argon2 算力。
-    pub async fn login(&self, guard_key: &str, login: &str, password: &str, client_ip: &str) -> Result<Session, UserError> {
+    pub async fn login(
+        &self,
+        guard_key: &str,
+        login: &str,
+        password: &str,
+        client_ip: &str,
+        ctx: &SessionContext,
+    ) -> Result<Session, UserError> {
         self.login_guard.check(guard_key).await?;
-        let result = self.login_inner(login, password).await;
+        let result = self.login_inner(login, password, ctx).await;
         match &result {
             Ok(s) => {
                 self.audit(
@@ -191,7 +210,7 @@ impl UserService {
         result
     }
 
-    async fn login_inner(&self, login: &str, password: &str) -> Result<Session, UserError> {
+    async fn login_inner(&self, login: &str, password: &str, ctx: &SessionContext) -> Result<Session, UserError> {
         let user = self
             .repo
             .find_by_login(login)
@@ -205,20 +224,20 @@ impl UserService {
         if !verify_password(password, hash) {
             return Err(UserError::InvalidCredentials);
         }
-        self.issue_session(user).await
+        self.issue_session(user, ctx).await
     }
 
     /// 用 refresh token 换取新会话（轮换：旧 token 立即吊销）。
-    pub async fn refresh(&self, raw_token: &str, client_ip: &str) -> Result<Session, UserError> {
+    pub async fn refresh(&self, raw_token: &str, client_ip: &str, ctx: &SessionContext) -> Result<Session, UserError> {
         let token_hash = hash_refresh_token(raw_token);
-        let result = self.refresh_inner(&token_hash, client_ip).await;
+        let result = self.refresh_inner(&token_hash, client_ip, ctx).await;
         if result.is_err() {
             self.audit(None, AuditAction::RefreshFailure, "invalid refresh token", client_ip).await;
         }
         result
     }
 
-    async fn refresh_inner(&self, token_hash: &str, client_ip: &str) -> Result<Session, UserError> {
+    async fn refresh_inner(&self, token_hash: &str, client_ip: &str, ctx: &SessionContext) -> Result<Session, UserError> {
         let (user_id, _) = self
             .refresh
             .find_active_by_hash(token_hash)
@@ -232,7 +251,7 @@ impl UserService {
             .await?
             .ok_or(UserError::UserNotFound)?;
         self.audit(Some(user.id), AuditAction::RefreshSuccess, "", client_ip).await;
-        self.issue_session(user).await
+        self.issue_session(user, ctx).await
     }
 
     /// 登出：吊销给定 refresh token（幂等：token 无效也返回成功）。
@@ -293,6 +312,7 @@ impl UserService {
         email: Option<&str>,
         profile: Option<&ExternalProfile>,
         client_ip: &str,
+        ctx: &SessionContext,
     ) -> Result<Session, UserError> {
         // 1. 已绑定：直接登录（顺带刷新平台原始资料缓存）
         if let Some(identity) = self.identities.find_by_external(provider, provider_uid).await? {
@@ -320,7 +340,7 @@ impl UserService {
                 .find_by_id(user.id)
                 .await?
                 .ok_or(UserError::UserNotFound)?;
-            return self.issue_session(user).await;
+            return self.issue_session(user, ctx).await;
         }
 
         // 2/3. 未绑定：需要 email 建账号或合并
@@ -390,7 +410,7 @@ impl UserService {
             format!("provider={provider}"),
             client_ip,
         ).await;
-        self.issue_session(user).await
+        self.issue_session(user, ctx).await
     }
 
     /// 回填规范资料：users 表该字段为空才写入平台值，非空不覆盖
@@ -499,7 +519,7 @@ impl UserService {
 
     /// 签发会话：封禁检查 → 生成 refresh token，哈希落库。
     /// 三种登录路径（密码/OAuth/Magic）共用此收口，封禁即刻生效。
-    async fn issue_session(&self, user: User) -> Result<Session, UserError> {
+    async fn issue_session(&self, user: User, ctx: &SessionContext) -> Result<Session, UserError> {
         if user.status == BANNED_STATUS {
             return Err(UserError::AccountBanned);
         }
@@ -511,6 +531,9 @@ impl UserService {
                 user_id: user.id,
                 token_hash: hash_refresh_token(&raw),
                 expires_at,
+                device_label: ctx.device_label.clone(),
+                ua: ctx.ua.clone(),
+                ip: ctx.ip.clone(),
             })
             .await?;
         Ok(Session {
@@ -696,6 +719,7 @@ impl UserService {
         &self,
         raw_token: &str,
         client_ip: &str,
+        ctx: &SessionContext,
     ) -> Result<Session, UserError> {
         let token_hash = hash_refresh_token(raw_token);
         let (email, purpose, _) = self
@@ -707,7 +731,7 @@ impl UserService {
             return Err(UserError::InvalidRefreshToken);
         }
         // 收件权即身份：能读到邮件 = 邮箱主人 = 平台已验证邮箱
-        self.login_with_identity("magic", &email, Some(&email), None, client_ip)
+        self.login_with_identity("magic", &email, Some(&email), None, client_ip, ctx)
             .await
     }
 
@@ -854,6 +878,31 @@ impl UserService {
             Some(user_id),
             AuditAction::IdentityUnlinked,
             format!("provider={provider}"),
+            client_ip,
+        ).await;
+        Ok(())
+    }
+
+    /// 列出当前用户的全部有效会话（设备列表）。
+    pub async fn list_sessions(&self, user_id: Uuid) -> Result<Vec<SessionView>, UserError> {
+        self.refresh.list_active_for_user(user_id).await
+    }
+
+    /// 踢掉指定会话（含当前会话自身：踢了就重新登录，语义最简）。
+    pub async fn revoke_session(
+        &self,
+        user_id: Uuid,
+        session_id: Uuid,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
+        let revoked = self.refresh.revoke_by_id(user_id, session_id).await?;
+        if !revoked {
+            return Err(UserError::UserNotFound);
+        }
+        self.audit(
+            Some(user_id),
+            AuditAction::SessionRevoked,
+            format!("session={session_id}"),
             client_ip,
         ).await;
         Ok(())
@@ -1276,10 +1325,11 @@ mod tests {
         }
     }
 
-    /// 内存 refresh token 仓储：模拟 PG 实现的语义（哈希查找、吊销）。
+    /// 内存 refresh token 仓储：模拟 PG 实现的语义（哈希查找、吊销、会话列表）。
     struct TestRefreshRepository {
         tokens: Mutex<HashMap<String, (Uuid, chrono::DateTime<Utc>)>>, // hash -> (user, expires)
         revoked: Mutex<std::collections::HashSet<String>>,
+        sessions: Mutex<HashMap<Uuid, (Uuid, chrono::DateTime<Utc>)>>, // id -> (user, created)
     }
 
     impl TestRefreshRepository {
@@ -1287,6 +1337,7 @@ mod tests {
             Self {
                 tokens: Mutex::new(HashMap::new()),
                 revoked: Mutex::new(std::collections::HashSet::new()),
+                sessions: Mutex::new(HashMap::new()),
             }
         }
     }
@@ -1298,6 +1349,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(token.token_hash, (token.user_id, token.expires_at));
+            self.sessions
+                .lock()
+                .unwrap()
+                .insert(token.id, (token.user_id, Utc::now()));
             Ok(())
         }
 
@@ -1332,6 +1387,34 @@ mod tests {
                 }
             }
             Ok(n)
+        }
+
+        async fn list_active_for_user(&self, user_id: Uuid) -> Result<Vec<SessionView>, UserError> {
+            let sessions = self.sessions.lock().unwrap();
+            let mut out: Vec<SessionView> = sessions
+                .iter()
+                .filter(|(_, (uid, _))| *uid == user_id)
+                .map(|(id, (_, created))| SessionView {
+                    id: *id,
+                    device_label: None,
+                    ua: None,
+                    ip: None,
+                    created_at: *created,
+                    expires_at: *created + chrono::Duration::days(30),
+                })
+                .collect();
+            out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(out)
+        }
+
+        async fn revoke_by_id(&self, user_id: Uuid, id: Uuid) -> Result<bool, UserError> {
+            let mut sessions = self.sessions.lock().unwrap();
+            if sessions.get(&id).is_some_and(|(uid, _)| *uid == user_id) {
+                sessions.remove(&id);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         }
     }
 
@@ -1537,17 +1620,17 @@ mod tests {
     async fn register_then_login_with_username_or_email() {
         let svc = service();
         let session = svc
-            .register("alice", "alice@example.com", "Str0ng-pass!", "127.0.0.1")
+            .register("alice", "alice@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         assert_eq!(session.user.username, "alice");
         assert!(!session.refresh_token.is_empty());
         assert!(session.refresh_expires_at > Utc::now() + Duration::days(29));
 
-        let by_name = svc.login("k:t1", "alice", "Str0ng-pass!", "127.0.0.1").await.unwrap();
+        let by_name = svc.login("k:t1", "alice", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
         assert_eq!(by_name.user.id, session.user.id);
         let by_email = svc
-            .login("k:t1", "alice@example.com", "Str0ng-pass!", "127.0.0.1")
+            .login("k:t1", "alice@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         assert_eq!(by_email.user.id, session.user.id);
@@ -1557,33 +1640,33 @@ mod tests {
     async fn refresh_rotates_token_and_old_becomes_invalid() {
         let svc = service();
         let s1 = svc
-            .register("dora", "dora@example.com", "Str0ng-pass!", "127.0.0.1")
+            .register("dora", "dora@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
 
-        let s2 = svc.refresh(&s1.refresh_token, "127.0.0.1").await.unwrap();
+        let s2 = svc.refresh(&s1.refresh_token, "127.0.0.1", &SessionContext::default()).await.unwrap();
         assert_eq!(s2.user.id, s1.user.id);
         assert_ne!(s2.refresh_token, s1.refresh_token, "rotation required");
 
         // 旧 token 已被轮换吊销
         assert!(matches!(
-            svc.refresh(&s1.refresh_token, "127.0.0.1").await,
+            svc.refresh(&s1.refresh_token, "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidRefreshToken)
         ));
         // 新 token 仍可用
-        assert!(svc.refresh(&s2.refresh_token, "127.0.0.1").await.is_ok());
+        assert!(svc.refresh(&s2.refresh_token, "127.0.0.1", &SessionContext::default()).await.is_ok());
     }
 
     #[tokio::test]
     async fn logout_revokes_and_is_idempotent() {
         let svc = service();
         let s = svc
-            .register("erin", "erin@example.com", "Str0ng-pass!", "127.0.0.1")
+            .register("erin", "erin@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         svc.logout(&s.refresh_token, "127.0.0.1").await.unwrap();
         assert!(matches!(
-            svc.refresh(&s.refresh_token, "127.0.0.1").await,
+            svc.refresh(&s.refresh_token, "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidRefreshToken)
         ));
         // 幂等：再登出一次也成功
@@ -1594,7 +1677,7 @@ mod tests {
     async fn change_password_requires_old_and_revokes_sessions() {
         let svc = service();
         let s = svc
-            .register("frank", "frank@example.com", "Str0ng-pass!", "127.0.0.1")
+            .register("frank", "frank@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
 
@@ -1609,11 +1692,11 @@ mod tests {
             .unwrap();
 
         // 旧密码登录失败，新密码成功
-        assert!(svc.login("k:t2", "frank", "Str0ng-pass!", "127.0.0.1").await.is_err());
-        assert!(svc.login("k:t2", "frank", "N3w-pass-word!", "127.0.0.1").await.is_ok());
+        assert!(svc.login("k:t2", "frank", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.is_err());
+        assert!(svc.login("k:t2", "frank", "N3w-pass-word!", "127.0.0.1", &SessionContext::default()).await.is_ok());
         // 已发的 refresh token 全部失效
         assert!(matches!(
-            svc.refresh(&s.refresh_token, "127.0.0.1").await,
+            svc.refresh(&s.refresh_token, "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidRefreshToken)
         ));
     }
@@ -1621,23 +1704,23 @@ mod tests {
     #[tokio::test]
     async fn duplicate_username_and_email_are_rejected() {
         let svc = service();
-        svc.register("bob", "bob@example.com", "Str0ng-pass!", "127.0.0.1")
+        svc.register("bob", "bob@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
 
         assert!(matches!(
-            svc.register("bob", "other@example.com", "Str0ng-pass!", "127.0.0.1")
+            svc.register("bob", "other@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
                 .await,
             Err(UserError::UsernameTaken(_))
         ));
         assert!(matches!(
-            svc.register("bobby", "bob@example.com", "Str0ng-pass!", "127.0.0.1")
+            svc.register("bobby", "bob@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
                 .await,
             Err(UserError::EmailTaken(_))
         ));
         // 大小写不敏感的唯一性
         assert!(matches!(
-            svc.register("BOB", "uppercase@example.com", "Str0ng-pass!", "127.0.0.1")
+            svc.register("BOB", "uppercase@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
                 .await,
             Err(UserError::UsernameTaken(_))
         ));
@@ -1646,16 +1729,16 @@ mod tests {
     #[tokio::test]
     async fn wrong_password_or_unknown_user_is_invalid_credentials() {
         let svc = service();
-        svc.register("carol", "carol@example.com", "Str0ng-pass!", "127.0.0.1")
+        svc.register("carol", "carol@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
 
         assert!(matches!(
-            svc.login("k:t3", "carol", "nope-nope-nope", "127.0.0.1").await,
+            svc.login("k:t3", "carol", "nope-nope-nope", "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidCredentials)
         ));
         assert!(matches!(
-            svc.login("k:t3", "ghost", "Str0ng-pass!", "127.0.0.1").await,
+            svc.login("k:t3", "ghost", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidCredentials)
         ));
     }
@@ -1664,15 +1747,15 @@ mod tests {
     async fn validation_errors() {
         let svc = service();
         assert!(matches!(
-            svc.register("ab", "x@example.com", "Str0ng-pass!", "127.0.0.1").await,
+            svc.register("ab", "x@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidUsername(_))
         ));
         assert!(matches!(
-            svc.register("valid", "not-an-email", "Str0ng-pass!", "127.0.0.1").await,
+            svc.register("valid", "not-an-email", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidEmail(_))
         ));
         assert!(matches!(
-            svc.register("valid", "x@example.com", "short", "127.0.0.1").await,
+            svc.register("valid", "x@example.com", "short", "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidPassword(_))
         ));
     }
@@ -1681,7 +1764,7 @@ mod tests {
     async fn email_verification_flow_marks_user_verified() {
         let (svc, sent) = service_with_mail(TestMailSender::default());
         let s = svc
-            .register("grace", "grace@example.com", "Str0ng-pass!", "127.0.0.1")
+            .register("grace", "grace@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         assert!(!s.user.email_verified);
@@ -1720,7 +1803,7 @@ mod tests {
     async fn email_change_flow_updates_email_after_confirm() {
         let (svc, sent) = service_with_mail(TestMailSender::default());
         let s = svc
-            .register("henry", "henry@example.com", "Str0ng-pass!", "127.0.0.1")
+            .register("henry", "henry@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
 
@@ -1729,7 +1812,7 @@ mod tests {
         assert_eq!(sent.sent.lock().unwrap().len(), 0);
 
         // 新邮箱已被他人占用 → 拒绝
-        svc.register("iris", "iris@example.com", "Str0ng-pass!", "127.0.0.1").await.unwrap();
+        svc.register("iris", "iris@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
         assert!(matches!(
             svc.request_email_change(s.user.id, "iris@example.com", "127.0.0.1").await,
             Err(UserError::EmailTaken(_))
@@ -1754,7 +1837,7 @@ mod tests {
         assert!(user.email_verified, "new email auto-verified");
 
         // 旧邮箱已释放，可被他人注册
-        assert!(svc.register("jack", "henry@example.com", "Str0ng-pass!", "127.0.0.1").await.is_ok());
+        assert!(svc.register("jack", "henry@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.is_ok());
     }
 
     /// 从确认邮件 HTML 的链接中提取 raw token（?token=...）。
@@ -1780,15 +1863,15 @@ mod tests {
                 Arc::new(TestIdentityRepository::new()),
             "http://localhost:8080".to_string(),
         );
-        svc.register("kate", "kate@example.com", "Str0ng-pass!", "9.9.9.9").await.unwrap();
+        svc.register("kate", "kate@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default()).await.unwrap();
 
         // 两次失败 → 计数 2，未锁
-        assert!(svc.login("ip:1.2.3.4:kate", "kate", "wrong1", "1.2.3.4").await.is_err());
-        assert!(svc.login("ip:1.2.3.4:kate", "kate", "wrong2", "1.2.3.4").await.is_err());
+        assert!(svc.login("ip:1.2.3.4:kate", "kate", "wrong1", "1.2.3.4", &SessionContext::default()).await.is_err());
+        assert!(svc.login("ip:1.2.3.4:kate", "kate", "wrong2", "1.2.3.4", &SessionContext::default()).await.is_err());
         assert_eq!(guard.failures("ip:1.2.3.4:kate"), 2);
 
         // 成功 → 清零
-        svc.login("ip:1.2.3.4:kate", "kate", "Str0ng-pass!", "1.2.3.4").await.unwrap();
+        svc.login("ip:1.2.3.4:kate", "kate", "Str0ng-pass!", "1.2.3.4", &SessionContext::default()).await.unwrap();
         assert_eq!(guard.failures("ip:1.2.3.4:kate"), 0);
     }
 
@@ -1805,19 +1888,19 @@ mod tests {
                 Arc::new(TestIdentityRepository::new()),
             "http://localhost:8080".to_string(),
         );
-        svc.register("liam", "liam@example.com", "Str0ng-pass!", "9.9.9.9").await.unwrap();
+        svc.register("liam", "liam@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default()).await.unwrap();
 
-        svc.login("k:liam", "liam", "bad", "1.1.1.1").await.unwrap_err();
-        svc.login("k:liam", "liam", "bad", "1.1.1.1").await.unwrap_err();
+        svc.login("k:liam", "liam", "bad", "1.1.1.1", &SessionContext::default()).await.unwrap_err();
+        svc.login("k:liam", "liam", "bad", "1.1.1.1", &SessionContext::default()).await.unwrap_err();
 
         // 锁定后：即使密码正确也拒绝 TooManyAttempts（不是 InvalidCredentials）
         assert!(matches!(
-            svc.login("k:liam", "liam", "Str0ng-pass!", "1.1.1.1").await,
+            svc.login("k:liam", "liam", "Str0ng-pass!", "1.1.1.1", &SessionContext::default()).await,
             Err(UserError::TooManyAttempts)
         ));
 
         // 其他 (ip,login) 键不受影响
-        assert!(svc.login("k:other", "liam", "Str0ng-pass!", "1.1.1.1").await.is_ok());
+        assert!(svc.login("k:other", "liam", "Str0ng-pass!", "1.1.1.1", &SessionContext::default()).await.is_ok());
     }
 
     #[tokio::test]
@@ -1836,12 +1919,12 @@ mod tests {
 
         // 用户不存在：内部按 InvalidCredentials 对外，但计入限流
         assert!(matches!(
-            svc.login("k:ghost", "ghost", "whatever", "1.1.1.1").await,
+            svc.login("k:ghost", "ghost", "whatever", "1.1.1.1", &SessionContext::default()).await,
             Err(UserError::InvalidCredentials)
         ));
         assert_eq!(guard.failures("k:ghost"), 1);
         assert!(matches!(
-            svc.login("k:ghost", "ghost", "whatever", "1.1.1.1").await,
+            svc.login("k:ghost", "ghost", "whatever", "1.1.1.1", &SessionContext::default()).await,
             Err(UserError::TooManyAttempts)
         ));
     }
@@ -1860,9 +1943,9 @@ mod tests {
             "http://localhost:8080".to_string(),
         );
 
-        let s = svc.register("mona", "mona@example.com", "Str0ng-pass!", "2.2.2.2").await.unwrap();
-        svc.login("k:mona", "mona", "bad", "3.3.3.3").await.unwrap_err();
-        svc.login("k:mona", "mona", "Str0ng-pass!", "3.3.3.3").await.unwrap();
+        let s = svc.register("mona", "mona@example.com", "Str0ng-pass!", "2.2.2.2", &SessionContext::default()).await.unwrap();
+        svc.login("k:mona", "mona", "bad", "3.3.3.3", &SessionContext::default()).await.unwrap_err();
+        svc.login("k:mona", "mona", "Str0ng-pass!", "3.3.3.3", &SessionContext::default()).await.unwrap();
         svc.change_password(s.user.id, "Str0ng-pass!", "N3w-pass-word!", "4.4.4.4").await.unwrap();
 
         // tokio::spawn 的审计异步落库：让一拍
@@ -1880,7 +1963,7 @@ mod tests {
     async fn oauth_new_user_auto_registers_and_logs_in() {
         let svc = service();
         let s1 = svc
-            .login_with_identity("github", "10001", Some("nina@example.com"), None, "5.5.5.5")
+            .login_with_identity("github", "10001", Some("nina@example.com"), None, "5.5.5.5", &SessionContext::default())
             .await
             .unwrap();
         assert_eq!(s1.user.email, "nina@example.com");
@@ -1892,7 +1975,7 @@ mod tests {
 
         // 二次登录：同身份直接登录既有账号（不新建用户、身份不重复绑定）
         let s2 = svc
-            .login_with_identity("github", "10001", Some("nina@example.com"), None, "5.5.5.5")
+            .login_with_identity("github", "10001", Some("nina@example.com"), None, "5.5.5.5", &SessionContext::default())
             .await
             .unwrap();
         assert_eq!(s2.user.id, s1.user.id);
@@ -1903,12 +1986,12 @@ mod tests {
         let svc = service();
         // 先用密码注册
         let password_user = svc
-            .register("oscar", "oscar@example.com", "Str0ng-pass!", "127.0.0.1")
+            .register("oscar", "oscar@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         // GitHub 身份首次登录：同邮箱 → 挂到既有账号
         let s = svc
-            .login_with_identity("github", "20002", Some("oscar@example.com"), None, "5.5.5.5")
+            .login_with_identity("github", "20002", Some("oscar@example.com"), None, "5.5.5.5", &SessionContext::default())
             .await
             .unwrap();
         assert_eq!(s.user.id, password_user.user.id, "merge not duplicate");
@@ -1916,7 +1999,7 @@ mod tests {
 
         // 密码登录仍然可用
         let by_password = svc
-            .login("k:o", "oscar@example.com", "Str0ng-pass!", "127.0.0.1")
+            .login("k:o", "oscar@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         assert_eq!(by_password.user.id, password_user.user.id);
@@ -1926,12 +2009,12 @@ mod tests {
     async fn oauth_username_conflict_gets_suffix() {
         let svc = service();
         // 占用 nina 用户名
-        svc.register("nina", "nina-plain@example.com", "Str0ng-pass!", "127.0.0.1")
+        svc.register("nina", "nina-plain@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         // GitHub 邮箱前缀同为 nina → 自动去重为 nina2
         let s = svc
-            .login_with_identity("github", "30003", Some("nina@example.com"), None, "5.5.5.5")
+            .login_with_identity("github", "30003", Some("nina@example.com"), None, "5.5.5.5", &SessionContext::default())
             .await
             .unwrap();
         assert_eq!(s.user.username, "nina2");
@@ -1941,20 +2024,20 @@ mod tests {
     async fn passwordless_account_rejects_password_login_and_can_set_password() {
         let svc = service();
         let s = svc
-            .login_with_identity("github", "40004", Some("pia@example.com"), None, "5.5.5.5")
+            .login_with_identity("github", "40004", Some("pia@example.com"), None, "5.5.5.5", &SessionContext::default())
             .await
             .unwrap();
 
         // 无密码账号密码登录：恒 InvalidCredentials（防枚举，不提示未设置密码）
         assert!(matches!(
-            svc.login("k:p", "pia@example.com", "whatever-pass", "127.0.0.1").await,
+            svc.login("k:p", "pia@example.com", "whatever-pass", "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidCredentials)
         ));
 
         // set_password：无密码 → 免验旧密码，设置后密码登录可用
         svc.set_password(s.user.id, "N3w-pass-word!", "5.5.5.5").await.unwrap();
         assert!(svc
-            .login("k:p", "pia@example.com", "N3w-pass-word!", "127.0.0.1")
+            .login("k:p", "pia@example.com", "N3w-pass-word!", "127.0.0.1", &SessionContext::default())
             .await
             .is_ok());
 
@@ -1976,7 +2059,7 @@ mod tests {
         drop(mails);
 
         // 未注册邮箱 verify → 自动注册（login_with_identity("magic") 路径）
-        let s = svc2.verify_magic_link(&raw, "6.6.6.6").await.unwrap();
+        let s = svc2.verify_magic_link(&raw, "6.6.6.6", &SessionContext::default()).await.unwrap();
         assert_eq!(s.user.email, "rory@example.com");
         assert!(s.user.email_verified);
         assert!(s.user.password_hash.is_none());
@@ -1988,7 +2071,7 @@ mod tests {
         assert_eq!(mails.len(), 2);
         let raw2 = extract_token_from_html(&mails[1].2);
         drop(mails);
-        let s2 = svc2.verify_magic_link(&raw2, "6.6.6.6").await.unwrap();
+        let s2 = svc2.verify_magic_link(&raw2, "6.6.6.6", &SessionContext::default()).await.unwrap();
         assert_eq!(s2.user.id, s.user.id, "existing account logs in");
     }
 
@@ -2001,20 +2084,20 @@ mod tests {
         drop(mails);
 
         // 一次性：第二次 verify 失败
-        assert!(svc.verify_magic_link(&raw, "6.6.6.6").await.is_ok());
+        assert!(svc.verify_magic_link(&raw, "6.6.6.6", &SessionContext::default()).await.is_ok());
         assert!(matches!(
-            svc.verify_magic_link(&raw, "6.6.6.6").await,
+            svc.verify_magic_link(&raw, "6.6.6.6", &SessionContext::default()).await,
             Err(UserError::InvalidRefreshToken)
         ));
 
         // 跨用途：signup token 不能当 magic link 用
-        svc.register("tess", "tess@example.com", "Str0ng-pass!", "127.0.0.1").await.unwrap();
+        svc.register("tess", "tess@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
         svc.request_email_verification("tess@example.com", "127.0.0.1").await.unwrap();
         let mails = sent.sent.lock().unwrap();
         let signup_raw = extract_token_from_html(&mails[1].2);
         drop(mails);
         assert!(matches!(
-            svc.verify_magic_link(&signup_raw, "6.6.6.6").await,
+            svc.verify_magic_link(&signup_raw, "6.6.6.6", &SessionContext::default()).await,
             Err(UserError::InvalidRefreshToken)
         ));
     }
@@ -2031,7 +2114,7 @@ mod tests {
     async fn change_username_validates_takes_and_updates() {
         let svc = service();
         let s = svc
-            .register("ursula", "ursula@example.com", "Str0ng-pass!", "9.9.9.9")
+            .register("ursula", "ursula@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
             .await
             .unwrap();
 
@@ -2043,7 +2126,7 @@ mod tests {
 
         // 与他人冲突
         let _ = svc
-            .register("victor", "victor@example.com", "Str0ng-pass!", "9.9.9.9")
+            .register("victor", "victor@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
             .await
             .unwrap();
         assert!(matches!(
@@ -2059,7 +2142,7 @@ mod tests {
 
         // 旧用户名可被他人注册
         assert!(svc
-            .register("ursula", "ursula-new@example.com", "Str0ng-pass!", "9.9.9.9")
+            .register("ursula", "ursula-new@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
             .await
             .is_ok());
     }
@@ -2068,7 +2151,7 @@ mod tests {
     async fn password_reset_full_flow_changes_password_and_revokes_sessions() {
         let (svc, sent) = service_with_mail(TestMailSender::default());
         let s = svc
-            .register("marc", "marc@example.com", "0ld-pass-word!", "9.9.9.9")
+            .register("marc", "marc@example.com", "0ld-pass-word!", "9.9.9.9", &SessionContext::default())
             .await
             .unwrap();
 
@@ -2082,9 +2165,9 @@ mod tests {
         svc.confirm_password_reset(&raw, "N3w-pass-word!", "9.9.9.9").await.unwrap();
 
         // 新密码可登录，旧密码不可
-        assert!(svc.login("k:p", "marc", "N3w-pass-word!", "1.2.3.4").await.is_ok());
+        assert!(svc.login("k:p", "marc", "N3w-pass-word!", "1.2.3.4", &SessionContext::default()).await.is_ok());
         assert!(matches!(
-            svc.login("k:p", "marc", "0ld-pass-word!", "1.2.3.4").await,
+            svc.login("k:p", "marc", "0ld-pass-word!", "1.2.3.4", &SessionContext::default()).await,
             Err(UserError::InvalidCredentials)
         ));
         let user = svc
@@ -2107,7 +2190,7 @@ mod tests {
             raw: Some(serde_json::json!({"login": "nina"})),
         };
         let s = svc
-            .login_with_identity("github", "60006", Some("nina-p@example.com"), Some(&p), "5.5.5.5")
+            .login_with_identity("github", "60006", Some("nina-p@example.com"), Some(&p), "5.5.5.5", &SessionContext::default())
             .await
             .unwrap();
 
@@ -2136,7 +2219,7 @@ mod tests {
             raw: Some(serde_json::json!({"login": "nina", "updated": true})),
         };
         let s2 = svc
-            .login_with_identity("github", "60006", Some("nina-p@example.com"), Some(&p2), "5.5.5.5")
+            .login_with_identity("github", "60006", Some("nina-p@example.com"), Some(&p2), "5.5.5.5", &SessionContext::default())
             .await
             .unwrap();
         assert_eq!(s2.user.display_name.as_deref(), Some("Nina Local"), "local edit wins");
@@ -2153,7 +2236,7 @@ mod tests {
     async fn update_profile_patch_semantics_and_validation() {
         let svc = service();
         let s = svc
-            .register("quinn", "quinn@example.com", "Str0ng-pass!", "9.9.9.9")
+            .register("quinn", "quinn@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
             .await
             .unwrap();
 
@@ -2214,7 +2297,7 @@ mod tests {
         let svc = service();
         // 纯 OAuth 用户（无密码，仅一个身份）：解绑被拒
         let s = svc
-            .login_with_identity("github", "70007", Some("raul@example.com"), None, "5.5.5.5")
+            .login_with_identity("github", "70007", Some("raul@example.com"), None, "5.5.5.5", &SessionContext::default())
             .await
             .unwrap();
         assert!(matches!(
@@ -2229,19 +2312,56 @@ mod tests {
 
         // 解绑不存在的 provider：拒绝
         let s2 = svc
-            .login_with_identity("github", "70008", Some("sara@example.com"), None, "5.5.5.5")
+            .login_with_identity("github", "70008", Some("sara@example.com"), None, "5.5.5.5", &SessionContext::default())
             .await
             .unwrap();
         assert!(svc.unbind_identity(s2.user.id, "google", "5.5.5.5").await.is_err());
 
         // 两个身份无密码：解绑其一允许
         let _ = svc
-            .login_with_identity("google", "80008", Some("sara@example.com"), None, "5.5.5.5")
+            .login_with_identity("google", "80008", Some("sara@example.com"), None, "5.5.5.5", &SessionContext::default())
             .await
             .unwrap();
         assert_eq!(svc.list_identities(s2.user.id).await.unwrap().len(), 2);
         svc.unbind_identity(s2.user.id, "github", "5.5.5.5").await.unwrap();
         assert_eq!(svc.list_identities(s2.user.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sessions_list_and_revoke() {
+        let svc = service();
+        let s1 = svc
+            .register("fresh1", "fresh1@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .await
+            .unwrap();
+        // 第二次登录 = 第二个会话
+        let _s2 = svc
+            .login("k:s2", "fresh1", "Str0ng-pass!", "192.168.1.7", &SessionContext::default())
+            .await
+            .unwrap();
+        let sessions = svc.list_sessions(s1.user.id).await.unwrap();
+        assert_eq!(sessions.len(), 2);
+
+        // 踢掉一个：列表减一，且该 token 失效
+        let victim = sessions[0].id;
+        svc.revoke_session(s1.user.id, victim, "127.0.0.1").await.unwrap();
+        assert_eq!(svc.list_sessions(s1.user.id).await.unwrap().len(), 1);
+
+        // 踢不存在的会话 / 他人会话：UserNotFound
+        assert!(matches!(
+            svc.revoke_session(s1.user.id, victim, "127.0.0.1").await,
+            Err(UserError::UserNotFound)
+        ));
+
+        // 越权：别的用户 id + 该会话 id 查不到
+        let other = svc
+            .register("fresh2", "fresh2@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .await
+            .unwrap();
+        assert!(matches!(
+            svc.revoke_session(other.user.id, victim, "127.0.0.1").await,
+            Err(UserError::UserNotFound)
+        ));
     }
 
     #[tokio::test]
@@ -2254,14 +2374,14 @@ mod tests {
 
         // 无密码账号（纯 OAuth）：恒 Ok 且不发信
         let _ = svc
-            .login_with_identity("github", "50005", Some("nora@example.com"), None, "6.6.6.6")
+            .login_with_identity("github", "50005", Some("nora@example.com"), None, "6.6.6.6", &SessionContext::default())
             .await
             .unwrap();
         svc.request_password_reset("nora@example.com", "6.6.6.6").await.unwrap();
         assert!(sent.sent.lock().unwrap().is_empty());
 
         // signup token 不能当 password_reset 用
-        svc.register("paul", "paul@example.com", "Str0ng-pass!", "127.0.0.1").await.unwrap();
+        svc.register("paul", "paul@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
         svc.request_email_verification("paul@example.com", "127.0.0.1").await.unwrap();
         let mails = sent.sent.lock().unwrap();
         let signup_raw = extract_token_from_html(&mails[0].2);

@@ -141,6 +141,7 @@ curl -X POST http://localhost:8080/api/auth/magic-link `
 | `/api/users/me/password` · `/me/email` · `/me/username` | PUT | 改密码 / 改邮箱 / 改用户名 |
 | `/api/users/me/profile` | PATCH | 改资料（部分更新 / 清空字段） |
 | `/api/users/me/identities` · `/identities/{provider}` | GET / DELETE | 已绑定外部身份列表 / 解绑（须保留至少一种登录方式） |
+| `/api/users/me/sessions` · `/sessions/{id}` | GET / DELETE | 有效会话列表（设备/UA/粗粒度 IP）/ 踢掉指定设备 |
 | `/api/admin/users` · `/users/{id}` · `/users/{id}/ban` · `/users/{id}/force-logout` · `/stats` | GET/PUT/POST | 管理接口（is_admin 实时校验） |
 | `/health` · `/metrics` | GET | 健康检查 / Prometheus 指标 |
 
@@ -165,7 +166,7 @@ curl -X POST http://localhost:8080/api/auth/magic-link `
 | Phase 3 | PostgreSQL + sqlx 落地（编译期校验 + 自动迁移） | ✅ |
 | Phase 4 | 邮箱验证、审计日志、访问日志、/metrics | ✅ |
 | Phase 5 | GitHub OAuth + Magic Link 免密登录 | ✅ |
-| Phase 6 | 找回密码、改用户名、用户资料（含平台资料回填/解绑）、admin 强制下线 | ✅ |
+| Phase 6 | 找回密码、改用户名、用户资料（含平台资料回填/解绑）、会话管理（列表/踢设备）、admin 强制下线 | ✅ |
 | Phase 7 | RBAC 权限、更多业务模块 | ⏳ |
 
 详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/AUTH_V2.md](docs/AUTH_V2.md)。

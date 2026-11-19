@@ -34,6 +34,11 @@ pub fn router(state: AppState) -> Router {
             "/api/users/me/identities/{provider}",
             delete(users_me::unbind_identity),
         )
+        .route("/api/users/me/sessions", get(users_me::list_sessions))
+        .route(
+            "/api/users/me/sessions/{id}",
+            delete(users_me::revoke_session),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

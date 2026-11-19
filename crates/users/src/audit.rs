@@ -24,6 +24,7 @@ pub enum AuditAction {
     UsernameChanged,
     ProfileUpdated,
     IdentityUnlinked,
+    SessionRevoked,
     AdminForceLogout,
 }
 
@@ -46,6 +47,7 @@ impl AuditAction {
             AuditAction::UsernameChanged => "username_changed",
             AuditAction::ProfileUpdated => "profile_updated",
             AuditAction::IdentityUnlinked => "identity_unlinked",
+            AuditAction::SessionRevoked => "session_revoked",
             AuditAction::AdminForceLogout => "admin_force_logout",
         }
     }
