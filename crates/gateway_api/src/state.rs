@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use infra_mail::ResendSender;
-use rovortex_users::{TokenSigner, UserService};
+use rovortex_users::{AdminService, DbBrowser, TokenSigner, UserService};
 use sqlx::PgPool;
-use storage_pg::{PgAuditRepository, PgEmailVerificationRepository, PgOauthIdentityRepository, PgRefreshTokenRepository, PgUserRepository};
+use storage_pg::{PgAuditRepository, PgDbBrowser, PgEmailVerificationRepository, PgOauthIdentityRepository, PgRefreshTokenRepository, PgUserRepository};
 
 use crate::rate_limit::InMemoryLoginGuard;
 
@@ -61,17 +61,23 @@ impl Config {
 #[derive(Clone)]
 pub struct AppState {
     pub users: Arc<UserService>,
+    /// 管理业务（列表/详情聚合/封禁/统计/首个 admin 提升）。
+    pub admin: Arc<AdminService>,
     pub tokens: Arc<TokenSigner>,
     /// 进程内 HTTP 指标（/metrics 暴露）。
     pub metrics: Arc<crate::metrics::Metrics>,
+    /// 进程内日志环形缓冲（admin 日志页：历史 + SSE 实时流）。
+    pub log_buffer: crate::log_buffer::LogBuffer,
     /// GitHub OAuth 凭据；None = 未配置，路由返回 404。
     pub oauth_github: Option<crate::routes::oauth::GithubOAuthConfig>,
-    /// 共享连接池（admin 数据库浏览等只读旁路使用）。
-    pub db: PgPool,
+    /// 管理端数据库浏览（只读旁路的业务层抽象，不再暴露裸连接池）。
+    pub db_browser: Arc<dyn DbBrowser>,
 }
 
 impl AppState {
-    pub async fn new() -> Self {
+    /// `log_buffer` 由 main.rs 先构造（要装进 tracing subscriber）再传入，
+    /// 保证 admin 日志页与 BufferLayer 写的是同一个实例。
+    pub async fn with_log_buffer(log_buffer: crate::log_buffer::LogBuffer) -> Self {
         let config = Config::from_env();
         let pool = prepare_pool(&config.dsn).await;
 
@@ -88,33 +94,42 @@ impl AppState {
 
         let users_service = Arc::new(UserService::new(
             repo.clone(),
-            refresh_repo,
+            refresh_repo.clone(),
             email_verif_repo,
             mail,
             Arc::new(InMemoryLoginGuard::new()),
+            audit_repo.clone(),
+            identity_repo.clone(),
+            config.verify_url_base,
+        ));
+
+        let admin_service = Arc::new(AdminService::new(
+            repo,
+            refresh_repo,
             audit_repo,
             identity_repo,
-            config.verify_url_base,
         ));
 
         // 首个 admin 的唯一入口：启动时按邮箱名单提升（幂等，账号不存在则下次启动再试）。
         if !config.admin_emails.is_empty() {
-            if let Err(e) = users_service.promote_admins(&config.admin_emails).await {
+            if let Err(e) = admin_service.promote_admins(&config.admin_emails).await {
                 tracing::warn!("admin promotion failed: {e}");
             }
         }
 
         Self {
             users: users_service,
+            admin: admin_service,
             tokens: Arc::new(TokenSigner::new(&config.jwt_secret)),
             metrics: Arc::new(crate::metrics::Metrics::new()),
+            log_buffer,
             oauth_github: config.oauth_github.map(|(client_id, client_secret)| {
                 crate::routes::oauth::GithubOAuthConfig {
                     client_id,
                     client_secret,
                 }
             }),
-            db: pool,
+            db_browser: Arc::new(PgDbBrowser::from_pool(pool)),
         }
     }
 }

@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use rovortex_users::{NewRefreshToken, RefreshTokenRepository, UserError};
+use rovortex_users::{NewRefreshToken, RefreshTokenRepository, SessionView, UserError};
 
 pub struct PgRefreshTokenRepository {
     pool: PgPool,
@@ -27,12 +27,15 @@ fn map_err(e: sqlx::Error) -> UserError {
 impl RefreshTokenRepository for PgRefreshTokenRepository {
     async fn insert(&self, token: NewRefreshToken) -> Result<(), UserError> {
         sqlx::query!(
-            r#"INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
-               VALUES ($1, $2, $3, $4)"#,
+            r#"INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, device_label, ua, ip_last)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
             token.id,
             token.user_id,
             token.token_hash,
             token.expires_at,
+            token.device_label,
+            token.ua,
+            token.ip,
         )
         .execute(&self.pool)
         .await
@@ -77,6 +80,43 @@ impl RefreshTokenRepository for PgRefreshTokenRepository {
         .await
         .map_err(map_err)?;
         Ok(result.rows_affected())
+    }
+
+    async fn list_active_for_user(&self, user_id: Uuid) -> Result<Vec<SessionView>, UserError> {
+        let rows = sqlx::query!(
+            r#"SELECT id, device_label, ua, ip_last, created_at, expires_at
+               FROM refresh_tokens
+               WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()
+               ORDER BY created_at DESC"#,
+            user_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| SessionView {
+                id: r.id,
+                device_label: r.device_label,
+                ua: r.ua,
+                ip: r.ip_last,
+                created_at: r.created_at,
+                expires_at: r.expires_at,
+            })
+            .collect())
+    }
+
+    async fn revoke_by_id(&self, user_id: Uuid, id: Uuid) -> Result<bool, UserError> {
+        let result = sqlx::query!(
+            r#"UPDATE refresh_tokens SET revoked_at = now()
+               WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL AND expires_at > now()"#,
+            id,
+            user_id,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(result.rows_affected() > 0)
     }
 }
 

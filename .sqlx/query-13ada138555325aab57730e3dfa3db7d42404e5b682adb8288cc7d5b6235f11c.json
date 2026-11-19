@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET\n                 display_name = CASE WHEN $2::bool THEN $3 ELSE display_name END,\n                 avatar_url   = CASE WHEN $4::bool THEN $5 ELSE avatar_url END,\n                 bio          = CASE WHEN $6::bool THEN $7 ELSE bio END,\n                 website_url  = CASE WHEN $8::bool THEN $9 ELSE website_url END,\n                 updated_at   = now()\n               WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Text",
+        "Bool",
+        "Text",
+        "Bool",
+        "Text",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "13ada138555325aab57730e3dfa3db7d42404e5b682adb8288cc7d5b6235f11c"
+}

@@ -10,8 +10,10 @@
 //!
 //! 依赖方向：`gateway_api → users`，本 crate 永远不反向依赖表现层。
 
+pub mod admin;
 pub mod audit;
 pub mod auth;
+pub mod db_browse;
 pub mod domain;
 pub mod email_verification;
 pub mod mail;
@@ -23,14 +25,20 @@ pub mod repository;
 pub mod service;
 
 pub use audit::{AuditAction, AuditEntry, AuditRepository, NewAuditLog};
+pub use admin::{AdminService, AdminStats, UserDetail, UserPage};
 pub use auth::TokenSigner;
+pub use db_browse::{
+    BrowseParams, ColumnInfo, DbBrowseError, DbBrowser, TableSummary, mask_rows,
+};
 pub use domain::{NewUser, User, UserError};
 pub use email_verification::{
     EmailVerificationRepository, NewEmailVerification, VerificationPurpose,
 };
 pub use mail::{MailError, MailSender};
-pub use oauth_identity::{ExternalIdentity, NewExternalIdentity, OauthIdentityRepository};
+pub use oauth_identity::{
+    ExternalIdentity, ExternalProfile, NewExternalIdentity, OauthIdentityRepository,
+};
 pub use rate_limit::{LoginGuard, guard_key};
-pub use refresh_token::{NewRefreshToken, RefreshTokenRepository};
+pub use refresh_token::{NewRefreshToken, RefreshTokenRepository, SessionView};
 pub use repository::UserRepository;
-pub use service::{BANNED_STATUS, UserService};
+pub use service::{ProfilePatch, SessionContext, UserService};

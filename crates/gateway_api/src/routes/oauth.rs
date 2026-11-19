@@ -2,10 +2,12 @@
 //!
 //! 协议细节只住本模块；业务层只见 `(provider, provider_uid, email)` 三元组。
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
+use std::net::SocketAddr;
+use rovortex_users::ExternalProfile;
 use serde::Deserialize;
 
 use crate::state::AppState;
@@ -69,6 +71,7 @@ pub struct CallbackQuery {
 pub async fn github_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     axum::extract::Query(query): axum::extract::Query<CallbackQuery>,
 ) -> Result<Response, ApiError> {
     let config = state
@@ -100,13 +103,35 @@ pub async fn github_callback(
     }
     .map(|e| e.to_string());
 
+    // 平台资料 → 规范字段映射 + raw JSON 缓存（裁剪掉无关长字段）
+    let raw = serde_json::json!({
+        "login": github_user.login,
+        "name": github_user.name,
+        "avatar_url": github_user.avatar_url,
+        "bio": github_user.bio,
+        "blog": github_user.blog,
+    });
+    let profile = ExternalProfile {
+        display_name: Some(
+            github_user
+                .name
+                .unwrap_or_else(|| github_user.login.clone()),
+        ),
+        avatar_url: Some(github_user.avatar_url),
+        bio: github_user.bio,
+        website_url: normalize_url(github_user.blog),
+        raw: Some(raw),
+    };
+
     let session = state
         .users
         .login_with_identity(
             "github",
             &github_user.id.to_string(),
             email.as_deref(),
+            Some(&profile),
             "oauth",
+            &crate::routes::users::session_context(&headers, addr),
         )
         .await?;
 
@@ -129,6 +154,29 @@ struct GithubUser {
     id: i64,
     /// GitHub 私有邮箱需要 user:email scope；未设置公共邮箱时可能为 None。
     email: Option<String>,
+    /// GitHub 登录名（@handle），用于 display_name fallback 与用户名生成。
+    login: String,
+    /// 用户设置的显示名。
+    name: Option<String>,
+    /// 头像 URL（GitHub 恒有）。
+    avatar_url: String,
+    /// 简介。
+    bio: Option<String>,
+    /// 个人主页（可能无协议，如 "example.com"）。
+    blog: Option<String>,
+}
+
+/// 补全无协议的 URL；空串/非法值丢弃。只做归一，不做可达性校验。
+fn normalize_url(url: Option<String>) -> Option<String> {
+    let u = url?.trim().to_string();
+    if u.is_empty() {
+        return None;
+    }
+    if u.starts_with("http://") || u.starts_with("https://") {
+        Some(u)
+    } else {
+        Some(format!("https://{u}"))
+    }
 }
 
 async fn exchange_code(config: &GithubOAuthConfig, code: &str) -> Result<String, ApiError> {

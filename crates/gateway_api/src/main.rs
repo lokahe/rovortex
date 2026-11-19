@@ -4,6 +4,8 @@
 //! 所有业务规则位于 `rovortex-users` 等业务模块。
 
 mod error;
+mod log_buffer;
+mod log_layer;
 mod mail_rate_limit;
 mod metrics;
 mod observe;
@@ -13,21 +15,28 @@ mod state;
 
 use std::net::SocketAddr;
 
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
 use crate::state::AppState;
 
 #[tokio::main]
 async fn main() {
     // 可观测性：RUST_LOG 优先，默认 info 级别。
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    // registry 组合：stdout fmt 层照常输出 + BufferLayer 同步进进程内 ring buffer
+    // （admin 日志页数据源；buffer 要先于 subscriber 存在，故先构造再装）。
+    let log_buffer = crate::log_buffer::LogBuffer::new(crate::log_buffer::LOG_BUFFER_CAPACITY);
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            ),
         )
+        .with(crate::log_layer::BufferLayer::new(log_buffer.clone()))
         .init();
-
     // 组合根：在这里注入具体仓储实现（当前为 PostgreSQL，含启动时迁移）。
-    let state = AppState::new().await;
+    let state = AppState::with_log_buffer(log_buffer.clone()).await;
     let app = routes::router(state.clone())
         .layer(cors_layer())
         .layer(axum::middleware::from_fn_with_state(

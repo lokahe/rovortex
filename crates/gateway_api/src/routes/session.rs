@@ -45,7 +45,8 @@ pub async fn refresh(
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     let ip = crate::routes::users::client_ip(&headers, addr);
-    let session = state.users.refresh(&req.refresh_token, &ip).await?;
+    let ctx = crate::routes::users::session_context(&headers, addr);
+    let session = state.users.refresh(&req.refresh_token, &ip, &ctx).await?;
     Ok(Json(auth_response(
         &state.tokens,
         session.user,

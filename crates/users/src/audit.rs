@@ -20,6 +20,16 @@ pub enum AuditAction {
     EmailChangeRequested,
     EmailChanged,
     MagicLinkRequested,
+    PasswordResetRequested,
+    UsernameChanged,
+    ProfileUpdated,
+    IdentityUnlinked,
+    SessionRevoked,
+    AccountDeletionRequested,
+    AccountDeleted,
+    AccountRecoveryRequested,
+    AccountRestored,
+    AdminForceLogout,
 }
 
 impl AuditAction {
@@ -37,6 +47,16 @@ impl AuditAction {
             AuditAction::EmailChangeRequested => "email_change_requested",
             AuditAction::EmailChanged => "email_changed",
             AuditAction::MagicLinkRequested => "magic_link_requested",
+            AuditAction::PasswordResetRequested => "password_reset_requested",
+            AuditAction::UsernameChanged => "username_changed",
+            AuditAction::ProfileUpdated => "profile_updated",
+            AuditAction::IdentityUnlinked => "identity_unlinked",
+            AuditAction::SessionRevoked => "session_revoked",
+            AuditAction::AccountDeletionRequested => "account_deletion_requested",
+            AuditAction::AccountDeleted => "account_deleted",
+            AuditAction::AccountRecoveryRequested => "account_recovery_requested",
+            AuditAction::AccountRestored => "account_restored",
+            AuditAction::AdminForceLogout => "admin_force_logout",
         }
     }
 }

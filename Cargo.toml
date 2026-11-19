@@ -18,7 +18,7 @@ rovortex-users = { path = "crates/users" }
 
 # ---- Web 框架与运行时 ----
 axum = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 # ---- 序列化 ----
@@ -41,7 +41,8 @@ jsonwebtoken = "9"
 
 # ---- 可观测性 ----
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+futures-util = { version = "0.3", default-features = false }
 
 # ---- HTTP 客户端（OAuth provider 交互）----
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

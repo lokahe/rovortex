@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, created_at, updated_at\n               FROM users WHERE email_key = $1",
+  "query": "SELECT id, username, username_key, email, email_key, password_hash, status, email_verified, is_admin, display_name, avatar_url, bio, website_url, deleted_at, created_at, updated_at\n               FROM users WHERE username_key = $1",
   "describe": {
     "columns": [
       {
@@ -50,11 +50,36 @@
       },
       {
         "ordinal": 9,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "bio",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "website_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "deleted_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 10,
+        "ordinal": 15,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -74,9 +99,14 @@
       false,
       false,
       false,
+      true,
+      true,
+      true,
+      true,
+      true,
       false,
       false
     ]
   },
-  "hash": "032d87290af788cc9dae7bcbf4143d01ad4218880e6f036e2a595b0512eff637"
+  "hash": "4ba253c0d8df4870abc3cc098011cf7eb3382a72606a5bada5daa4022319f0a8"
 }

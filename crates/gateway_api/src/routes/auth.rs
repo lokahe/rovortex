@@ -74,22 +74,54 @@ where
     }
 }
 
+/// 从请求提取 JWT：`Authorization: Bearer` 头优先；fallback `access_token`
+/// 查询参数（EventSource 不能带自定义头，SSE 流只能走 query——OAuth2 规范同款）。
+fn bearer_token(req: &axum::extract::Request) -> Option<String> {
+    if let Some(v) = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        return Some(v.to_string());
+    }
+    let query = req.uri().query()?;
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == "access_token").then(|| urldecode(v))
+    })
+}
+
+/// JWT 是 base64url（A-Za-z0-9-_.），query 里唯一可能被转义的是 `.`（%2E）
+/// 和字符集外的 %；做最小 percent 解码。
+fn urldecode(v: &str) -> String {
+    let bytes = v.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(n) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+                out.push(n);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 pub async fn require_auth(
     State(state): State<AppState>,
     mut req: axum::extract::Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let token = req
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-
-    let Some(token) = token else {
+    let Some(token) = bearer_token(&req) else {
         return Err(unauthorized("missing bearer token"));
     };
 
-    match state.tokens.verify(token) {
+    match state.tokens.verify(&token) {
         Ok(user_id) => {
             req.extensions_mut().insert(AuthUser { user_id });
             Ok(next.run(req).await)
@@ -104,19 +136,13 @@ pub async fn require_admin(
     mut req: axum::extract::Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let token = req
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-
-    let Some(token) = token else {
+    let Some(token) = bearer_token(&req) else {
         return Err(unauthorized("missing bearer token"));
     };
 
     let user_id = state
         .tokens
-        .verify(token)
+        .verify(&token)
         .map_err(|_| unauthorized("invalid or expired token"))?;
 
     match state.users.repository().is_admin(user_id).await {

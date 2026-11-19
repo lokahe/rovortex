@@ -48,6 +48,18 @@ pub trait UserRepository: Send + Sync {
     /// 并更新 updated_at；邮箱冲突由数据库唯一索引兜底。
     async fn update_email(&self, id: uuid::Uuid, new_email: &str) -> Result<(), UserError>;
 
+    /// 更新用户名（改用户名）。实现必须更新 updated_at；
+    /// 用户名冲突由数据库唯一索引兜底。
+    async fn update_username(&self, id: uuid::Uuid, new_username: &str) -> Result<(), UserError>;
+
+    /// 部分更新展示资料（PATCH 语义）：只更新 patch 中 Some 的字段，
+    /// `Some(None)` 表示清空该字段。实现必须更新 updated_at。
+    async fn update_profile(
+        &self,
+        id: uuid::Uuid,
+        patch: &crate::service::ProfilePatch,
+    ) -> Result<(), UserError>;
+
     /// 查询用户是否为管理员（admin API 每请求实时校验，撤销立即生效）。
     async fn is_admin(&self, id: uuid::Uuid) -> Result<bool, UserError>;
 
@@ -64,6 +76,13 @@ pub trait UserRepository: Send + Sync {
 
     /// 设置用户状态（admin 封禁/解封）。实现方需同步更新 updated_at。
     async fn set_status(&self, id: uuid::Uuid, status: i16) -> Result<(), UserError>;
+
+    /// 注销（软删）：置 status=2 + deleted_at、清空展示资料。
+    /// 邮箱保留占位（唯一索引仍挡新注册），冷静期后由 cron 硬删释放。
+    async fn soft_delete(&self, id: uuid::Uuid) -> Result<(), UserError>;
+
+    /// 恢复注销账号（冷静期内）：status 回 0、清 deleted_at。
+    async fn restore(&self, id: uuid::Uuid) -> Result<(), UserError>;
 
     /// 置为管理员（启动时 ROVORTEX_ADMIN_EMAILS 提升首个 admin）。
     async fn promote_admin(&self, id: uuid::Uuid) -> Result<(), UserError>;

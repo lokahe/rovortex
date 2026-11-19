@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, user_id, provider, provider_uid, email, created_at FROM user_identities WHERE provider = $1 AND provider_uid = $2",
+  "query": "SELECT id, user_id, provider, provider_uid, email, raw_profile AS \"raw_profile: _\", created_at FROM user_identities WHERE provider = $1 AND provider_uid = $2",
   "describe": {
     "columns": [
       {
@@ -30,6 +30,11 @@
       },
       {
         "ordinal": 5,
+        "name": "raw_profile: _",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
@@ -46,8 +51,9 @@
       false,
       false,
       true,
+      true,
       false
     ]
   },
-  "hash": "8fcbab9ff84d427b0b7b895813aa1a2ae75c352998ac9c065f771249322a4b0b"
+  "hash": "50f0011c49defa60b16eab396c831c442edac9c006c5fd34a912fe9efd99923f"
 }
