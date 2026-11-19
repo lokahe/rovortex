@@ -136,9 +136,12 @@ curl -X POST http://localhost:8080/api/auth/magic-link `
 | `/api/auth/email-change/confirm` | GET | 改邮箱确认 |
 | `/api/auth/oauth/github` · `/callback` | GET | GitHub OAuth 登录 |
 | `/api/auth/magic-link` · `/verify` | POST / GET | Magic Link 登录 |
+| `/api/auth/password-reset/request` · `/confirm` | POST / GET | 找回密码（响应恒 202，防枚举） |
 | `/api/users/me` | GET | 当前用户（Bearer JWT） |
-| `/api/users/me/password` · `/me/email` | PUT | 改密码 / 改邮箱 |
-| `/api/admin/users` · `/users/{id}` · `/users/{id}/ban` · `/stats` | GET/PUT | 管理接口（is_admin 实时校验） |
+| `/api/users/me/password` · `/me/email` · `/me/username` | PUT | 改密码 / 改邮箱 / 改用户名 |
+| `/api/users/me/profile` | PATCH | 改资料（部分更新 / 清空字段） |
+| `/api/users/me/identities` · `/identities/{provider}` | GET / DELETE | 已绑定外部身份列表 / 解绑（须保留至少一种登录方式） |
+| `/api/admin/users` · `/users/{id}` · `/users/{id}/ban` · `/users/{id}/force-logout` · `/stats` | GET/PUT/POST | 管理接口（is_admin 实时校验） |
 | `/health` · `/metrics` | GET | 健康检查 / Prometheus 指标 |
 
 错误响应统一为 `{"error":{"code":"...","message":"..."}}`：
@@ -162,6 +165,7 @@ curl -X POST http://localhost:8080/api/auth/magic-link `
 | Phase 3 | PostgreSQL + sqlx 落地（编译期校验 + 自动迁移） | ✅ |
 | Phase 4 | 邮箱验证、审计日志、访问日志、/metrics | ✅ |
 | Phase 5 | GitHub OAuth + Magic Link 免密登录 | ✅ |
-| Phase 6 | RBAC 权限、更多业务模块 | ⏳ |
+| Phase 6 | 找回密码、改用户名、用户资料（含平台资料回填/解绑）、admin 强制下线 | ✅ |
+| Phase 7 | RBAC 权限、更多业务模块 | ⏳ |
 
 详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/AUTH_V2.md](docs/AUTH_V2.md)。

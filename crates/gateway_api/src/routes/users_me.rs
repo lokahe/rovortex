@@ -44,12 +44,27 @@ pub struct ChangeUsernameRequest {
 }
 
 /// PATCH 语义的资料更新：字段缺省 = 不动；null = 清空。
+///
+/// serde 默认会把 `"bio": null` 反序列化成外层 `None`（与缺省无法区分），
+/// 这里用 double_option：缺省 → None，present(null) → Some(None)，present(v) → Some(Some(v))。
 #[derive(Debug, Deserialize)]
 pub struct UpdateProfileRequest {
+    #[serde(default, deserialize_with = "double_option")]
     pub display_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub avatar_url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub bio: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub website_url: Option<Option<String>>,
+}
+
+fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(de).map(Some)
 }
 
 #[derive(Debug, Serialize)]

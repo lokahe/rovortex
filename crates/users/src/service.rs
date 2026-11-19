@@ -838,7 +838,7 @@ impl UserService {
         self.repo.find_by_id(user_id).await?.ok_or(UserError::UserNotFound)?;
         let bound = self.identities.list_for_user(user_id).await?;
         if !bound.iter().any(|i| i.provider == provider) {
-            return Err(UserError::InvalidRefreshToken);
+            return Err(UserError::UserNotFound);
         }
         let has_password = self
             .repo
@@ -847,9 +847,7 @@ impl UserService {
             .is_some_and(|u| u.password_hash.is_some());
         let other_identities = bound.iter().any(|i| i.provider != provider);
         if !has_password && !other_identities {
-            return Err(UserError::Hashing(
-                "cannot unbind the last login method".into(),
-            ));
+            return Err(UserError::LastLoginMethod);
         }
         self.identities.remove(user_id, provider).await?;
         self.audit(
@@ -2221,7 +2219,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             svc.unbind_identity(s.user.id, "github", "5.5.5.5").await,
-            Err(UserError::Hashing(_))
+            Err(UserError::LastLoginMethod)
         ));
 
         // 设密码后可解绑

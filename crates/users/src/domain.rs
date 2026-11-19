@@ -70,6 +70,9 @@ pub enum UserError {
     #[error("too many attempts, try again later")]
     TooManyAttempts,
 
+    #[error("cannot remove the last login method")]
+    LastLoginMethod,
+
     #[error("account is banned")]
     AccountBanned,
 
