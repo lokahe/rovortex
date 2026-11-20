@@ -21,6 +21,8 @@ struct Config {
     resend_api_key: Option<String>,
     /// GitHub OAuth App 凭据；两者都配置时才启用 GitHub 登录路由。
     oauth_github: Option<(String, String)>,
+    /// Google OAuth Client 凭据；两者都配置时才启用 Google 登录路由。
+    oauth_google: Option<(String, String)>,
     /// 验证邮件里确认链接的前缀。
     verify_url_base: String,
     /// 逗号分隔的管理员邮箱名单；启动时对已有账号提升 is_admin。
@@ -50,6 +52,13 @@ impl Config {
                 (Some(id), Some(secret)) => Some((id, secret)),
                 _ => None,
             },
+            oauth_google: match (
+                std::env::var("OAUTH_GOOGLE_CLIENT_ID").ok().filter(|s| !s.is_empty()),
+                std::env::var("OAUTH_GOOGLE_CLIENT_SECRET").ok().filter(|s| !s.is_empty()),
+            ) {
+                (Some(id), Some(secret)) => Some((id, secret)),
+                _ => None,
+            },
             verify_url_base: std::env::var("ROVORTEX_VERIFY_URL_BASE")
                 .unwrap_or_else(|_| "http://localhost:8080".to_string()),
             admin_emails: std::env::var("ROVORTEX_ADMIN_EMAILS")
@@ -73,6 +82,8 @@ pub struct AppState {
     pub log_buffer: crate::log_buffer::LogBuffer,
     /// GitHub OAuth 凭据；None = 未配置，路由返回 404。
     pub oauth_github: Option<crate::routes::oauth::GithubOAuthConfig>,
+    /// Google OAuth Client 凭据；None = 未配置，路由返回 404。
+    pub oauth_google: Option<crate::routes::oauth::GoogleOAuthConfig>,
     /// 管理端数据库浏览（只读旁路的业务层抽象，不再暴露裸连接池）。
     pub db_browser: Arc<dyn DbBrowser>,
     /// 审计日志仓储（admin db 增删改的证据链写入点）。
@@ -135,6 +146,12 @@ impl AppState {
             log_buffer,
             oauth_github: config.oauth_github.map(|(client_id, client_secret)| {
                 crate::routes::oauth::GithubOAuthConfig {
+                    client_id,
+                    client_secret,
+                }
+            }),
+            oauth_google: config.oauth_google.map(|(client_id, client_secret)| {
+                crate::routes::oauth::GoogleOAuthConfig {
                     client_id,
                     client_secret,
                 }

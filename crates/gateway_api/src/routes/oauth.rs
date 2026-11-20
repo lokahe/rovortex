@@ -1,4 +1,4 @@
-//! GitHub OAuth 登录：authorize 跳转 + callback 换会话。
+//! GitHub / Google OAuth 登录：authorize 跳转 + callback 换会话。
 //!
 //! 协议细节只住本模块；业务层只见 `(provider, provider_uid, email)` 三元组。
 
@@ -307,6 +307,191 @@ fn reqwest_client() -> reqwest::Client {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("reqwest client")
+}
+
+// ---- Google OAuth（OIDC）----
+
+/// Google OAuth Client 凭据（组合根从环境变量注入）。
+#[derive(Clone)]
+pub struct GoogleOAuthConfig {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+const GOOGLE_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const GOOGLE_USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/userinfo";
+const GOOGLE_STATE_COOKIE: &str = "rovortex_oauth_state_google";
+
+/// GET /api/auth/oauth/google —— 302 跳 Google 授权页。
+pub async fn google_authorize(
+    State(state): State<AppState>,
+) -> Result<Response, ApiError> {
+    let config = state
+        .oauth_google
+        .as_ref()
+        .ok_or(ApiError::not_found())?;
+    let oauth_state = new_oauth_state();
+
+    // scope=openid email profile；access_type=online（不取 refresh token，只登录用）
+    let redirect = format!(
+        "{GOOGLE_AUTHORIZE_URL}?client_id={}&redirect_uri={}&response_type=code&state={}&scope=openid%20email%20profile&access_type=online",
+        urlencode(&config.client_id),
+        urlencode(&google_callback_url()),
+        urlencode(&oauth_state),
+    );
+
+    let mut response = Redirect::to(&redirect).into_response();
+    let cookie = format!(
+        "{GOOGLE_STATE_COOKIE}={oauth_state}; Path=/; HttpOnly; SameSite=Lax; Max-Age={STATE_COOKIE_MAX_AGE_SECS}"
+    );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        header::HeaderValue::from_str(&cookie)
+            .map_err(|_| ApiError::internal("bad cookie".into()))?,
+    );
+    Ok(response)
+}
+
+/// GET /api/auth/oauth/google/callback?code=...&state=...
+pub async fn google_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    axum::extract::Query(query): axum::extract::Query<GoogleCallbackQuery>,
+) -> Result<Response, ApiError> {
+    let config = state
+        .oauth_google
+        .as_ref()
+        .ok_or(ApiError::not_found())?;
+
+    if query.error.is_some() {
+        return Err(ApiError::bad_request("oauth denied".into()));
+    }
+
+    let cookie_state = read_cookie(&headers, GOOGLE_STATE_COOKIE)
+        .ok_or(ApiError::bad_request("missing oauth state".into()))?;
+    if !constant_time_eq(cookie_state.as_bytes(), query.state.as_bytes()) {
+        return Err(ApiError::bad_request("oauth state mismatch".into()));
+    }
+
+    let access_token = exchange_google_code(config, &query.code).await?;
+    let google_user = fetch_google_user(&access_token).await?;
+
+    // 设计约束：所有 provider 必须报告 verified email 才允许绑定（AUTH_V2.md §3）。
+    if !google_user.email_verified {
+        return Err(ApiError::bad_request("google email not verified".into()));
+    }
+
+    let raw = serde_json::json!({
+        "sub": google_user.sub,
+        "name": google_user.name,
+        "picture": google_user.picture,
+        "email": google_user.email,
+    });
+    let profile = ExternalProfile {
+        display_name: Some(
+            google_user
+                .name
+                .clone()
+                .unwrap_or_else(|| google_user.email.clone()),
+        ),
+        avatar_url: google_user.picture.clone(),
+        bio: None,
+        website_url: None,
+        raw: Some(raw),
+    };
+
+    let session = state
+        .users
+        .login_with_identity(
+            "google",
+            &google_user.sub,
+            Some(&google_user.email),
+            Some(&profile),
+            "oauth",
+            &crate::routes::users::session_context(&headers, addr),
+        )
+        .await?;
+
+    let auth = auth_response(
+        &state.tokens,
+        session.user,
+        session.refresh_token,
+        session.refresh_expires_at,
+    )?;
+    Ok((StatusCode::OK, Json(auth)).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct GoogleCallbackQuery {
+    pub code: String,
+    pub state: String,
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GoogleTokenResponse {
+    access_token: String,
+}
+
+#[derive(Deserialize)]
+struct GoogleUser {
+    /// Google 账号稳定 ID（OIDC sub），永不变化。
+    sub: String,
+    email: String,
+    /// Google 报告的邮箱验证状态；未验证一律拒绝绑定。
+    email_verified: bool,
+    name: Option<String>,
+    picture: Option<String>,
+}
+
+fn google_callback_url() -> String {
+    let base = std::env::var("ROVORTEX_VERIFY_URL_BASE")
+        .unwrap_or_else(|_| "http://localhost:8080".into());
+    format!("{base}/api/auth/oauth/google/callback")
+}
+
+async fn exchange_google_code(config: &GoogleOAuthConfig, code: &str) -> Result<String, ApiError> {
+    let client = reqwest_client();
+    let redirect_uri = google_callback_url();
+    let params = [
+        ("client_id", config.client_id.as_str()),
+        ("client_secret", config.client_secret.as_str()),
+        ("code", code),
+        ("redirect_uri", redirect_uri.as_str()),
+        ("grant_type", "authorization_code"),
+    ];
+    let resp = client
+        .post(GOOGLE_TOKEN_URL)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(format!("google token request failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(ApiError::bad_request("oauth code invalid".into()));
+    }
+    let token: GoogleTokenResponse = resp
+        .json()
+        .await
+        .map_err(|e| ApiError::internal(format!("google token parse failed: {e}")))?;
+    Ok(token.access_token)
+}
+
+async fn fetch_google_user(access_token: &str) -> Result<GoogleUser, ApiError> {
+    let client = reqwest_client();
+    let resp = client
+        .get(GOOGLE_USERINFO_URL)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(format!("google userinfo request failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(ApiError::bad_request("oauth token invalid".into()));
+    }
+    resp.json()
+        .await
+        .map_err(|e| ApiError::internal(format!("google user parse failed: {e}")))
 }
 
 use crate::error::ApiError;

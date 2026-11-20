@@ -85,6 +85,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/email-change/confirm", get(verify_email::confirm_email_change))
         .route("/api/auth/oauth/github", get(oauth::github_authorize))
         .route("/api/auth/oauth/github/callback", get(oauth::github_callback))
+        .route("/api/auth/oauth/google", get(oauth::google_authorize))
+        .route("/api/auth/oauth/google/callback", get(oauth::google_callback))
         .route("/api/auth/magic-link", post(magic::request_magic_link))
         .route("/api/auth/magic-link/verify", get(magic::verify_magic_link))
         .route("/api/auth/password-reset/request", post(password_reset::request_reset))
