@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod oauth;
 pub mod password_reset;
 pub mod session;
+pub mod signup;
 pub mod users;
 pub mod users_me;
 pub mod verify_email;
@@ -74,6 +75,9 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics::handler))
         .route("/api/users/register", post(users::register))
         .route("/api/users/login", post(users::login))
+        .route("/api/auth/signup/request", post(signup::request_signup))
+        .route("/api/auth/signup/confirm-code", post(signup::confirm_code))
+        .route("/api/auth/signup/confirm", get(signup::confirm_form).post(signup::confirm_submit))
         .route("/api/auth/refresh", post(session::refresh))
         .route("/api/auth/logout", post(session::logout))
         .route("/api/auth/verify-email/request", post(verify_email::request_verification))
@@ -81,9 +85,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/email-change/confirm", get(verify_email::confirm_email_change))
         .route("/api/auth/oauth/github", get(oauth::github_authorize))
         .route("/api/auth/oauth/github/callback", get(oauth::github_callback))
+        .route("/api/auth/oauth/google", get(oauth::google_authorize))
+        .route("/api/auth/oauth/google/callback", get(oauth::google_callback))
         .route("/api/auth/magic-link", post(magic::request_magic_link))
         .route("/api/auth/magic-link/verify", get(magic::verify_magic_link))
         .route("/api/auth/password-reset/request", post(password_reset::request_reset))
+        .route("/api/auth/password-reset/confirm-code", post(password_reset::confirm_code))
         .route("/api/auth/password-reset/confirm", get(password_reset::confirm_form).post(password_reset::confirm_submit))
         .route("/api/auth/account/recover", post(account::request_recovery))
         .route("/api/auth/account/confirm-deletion", get(account::confirm_deletion))

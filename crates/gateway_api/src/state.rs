@@ -21,6 +21,8 @@ struct Config {
     resend_api_key: Option<String>,
     /// GitHub OAuth App 凭据；两者都配置时才启用 GitHub 登录路由。
     oauth_github: Option<(String, String)>,
+    /// Google OAuth Client 凭据；两者都配置时才启用 Google 登录路由。
+    oauth_google: Option<(String, String)>,
     /// 验证邮件里确认链接的前缀。
     verify_url_base: String,
     /// 逗号分隔的管理员邮箱名单；启动时对已有账号提升 is_admin。
@@ -50,6 +52,13 @@ impl Config {
                 (Some(id), Some(secret)) => Some((id, secret)),
                 _ => None,
             },
+            oauth_google: match (
+                std::env::var("OAUTH_GOOGLE_CLIENT_ID").ok().filter(|s| !s.is_empty()),
+                std::env::var("OAUTH_GOOGLE_CLIENT_SECRET").ok().filter(|s| !s.is_empty()),
+            ) {
+                (Some(id), Some(secret)) => Some((id, secret)),
+                _ => None,
+            },
             verify_url_base: std::env::var("ROVORTEX_VERIFY_URL_BASE")
                 .unwrap_or_else(|_| "http://localhost:8080".to_string()),
             admin_emails: std::env::var("ROVORTEX_ADMIN_EMAILS")
@@ -73,12 +82,16 @@ pub struct AppState {
     pub log_buffer: crate::log_buffer::LogBuffer,
     /// GitHub OAuth 凭据；None = 未配置，路由返回 404。
     pub oauth_github: Option<crate::routes::oauth::GithubOAuthConfig>,
+    /// Google OAuth Client 凭据；None = 未配置，路由返回 404。
+    pub oauth_google: Option<crate::routes::oauth::GoogleOAuthConfig>,
     /// 管理端数据库浏览（只读旁路的业务层抽象，不再暴露裸连接池）。
     pub db_browser: Arc<dyn DbBrowser>,
     /// 审计日志仓储（admin db 增删改的证据链写入点）。
     pub audit: Arc<dyn rovortex_users::AuditRepository>,
     /// 发信频率限制（magic link / 找回密码 / 注销恢复共用一个实例）。
     pub mail_limiter: Arc<crate::mail_rate_limit::MailRateLimiter>,
+    /// 注册验证码确认尝试限流（6 位码爆破防线）。
+    pub confirm_code_limiter: Arc<crate::routes::signup::ConfirmCodeLimiter>,
 }
 
 impl AppState {
@@ -137,11 +150,18 @@ impl AppState {
                     client_secret,
                 }
             }),
+            oauth_google: config.oauth_google.map(|(client_id, client_secret)| {
+                crate::routes::oauth::GoogleOAuthConfig {
+                    client_id,
+                    client_secret,
+                }
+            }),
             db_browser: Arc::new(PgDbBrowser::from_pool(pool.clone())),
             audit: audit_repo.clone(),
             mail_limiter: Arc::new(crate::mail_rate_limit::MailRateLimiter::with_config(
                 crate::config::mail_rate_limit_config(),
             )),
+            confirm_code_limiter: Arc::new(crate::routes::signup::ConfirmCodeLimiter::new()),
         }
     }
 }

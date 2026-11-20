@@ -14,7 +14,10 @@ use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
-    pub username: String,
+    /// 可选：想要展示的用户名。缺省由邮箱前缀自动生成（冲突加数字后缀）；
+    /// 占用冲突返回 409，客户端可不填避免撞名。
+    #[serde(default)]
+    pub username: Option<String>,
     pub email: String,
     pub password: String,
 }
@@ -65,7 +68,7 @@ pub async fn register(
     let ip = client_ip(&headers, addr);
     let session = state
         .users
-        .register(&req.username, &req.email, &req.password, &ip, &session_context(&headers, addr))
+        .register(req.username.as_deref(), &req.email, &req.password, &ip, &session_context(&headers, addr))
         .await?;
     let token = state.tokens.sign(session.user.id)?;
     Ok((

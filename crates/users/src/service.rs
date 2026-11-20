@@ -177,31 +177,40 @@ impl UserService {
     }
 
     /// 注册：校验 → 查重 → Argon2id 哈希 → 持久化 → 签发会话。
+    ///
+    /// `username` 可空：None 时由邮箱前缀自动生成（冲突加数字后缀），用户后续
+    /// 可通过 PUT /me/username 修改；Some 时仍做格式校验与唯一性检查（409）。
     pub async fn register(
         &self,
-        username: &str,
+        username: Option<&str>,
         email: &str,
         password: &str,
         client_ip: &str,
         ctx: &SessionContext,
     ) -> Result<Session, UserError> {
-        validate_username(username)?;
         validate_email(email)?;
         self.validate_password_len(password)?;
 
         // 预检查提升常见错误的可读性；真正的唯一性仍由仓储层保证（数据库唯一索引）。
-        if self.repo.find_by_username(username).await?.is_some() {
-            return Err(UserError::UsernameTaken(username.into()));
+        if let Some(name) = username {
+            validate_username(name)?;
+            if self.repo.find_by_username(name).await?.is_some() {
+                return Err(UserError::UsernameTaken(name.into()));
+            }
         }
         if self.repo.find_by_email(email).await?.is_some() {
             return Err(UserError::EmailTaken(email.into()));
         }
 
         let password_hash = hash_password(password)?;
+        let username = match username {
+            Some(name) => name.to_string(),
+            None => self.unique_username_from(email, None).await?,
+        };
         let user = self
             .repo
             .create(NewUser {
-                username: username.into(),
+                username,
                 email: email.into(),
                 password_hash: Some(password_hash),
             })
@@ -209,7 +218,7 @@ impl UserService {
         self.audit(
             Some(user.id),
             AuditAction::Register,
-            format!("username={username}"),
+            format!("username={}", user.username),
             client_ip,
         ).await;
         self.issue_session(user, ctx).await
@@ -615,6 +624,160 @@ impl UserService {
         })
     }
 
+    /// 发起邮箱注册验证：不建号，发双通道验证邮件（6 位验证码 + 确认链接）。
+    ///
+    /// 账号在验证成功（confirm_code / confirm_link）时才创建——错邮箱零残留，
+    /// 未验证账号从未有过会话。两条通道各持一条一次性记录，任一成功即可。
+    /// 防枚举：邮箱已注册则不发信但恒 Ok。发信失败不阻断（可重发），只记录。
+    pub async fn request_signup(&self, email: &str, client_ip: &str) -> Result<(), UserError> {
+        validate_email(email)?;
+        if self.repo.find_by_email(email).await?.is_some() {
+            return Ok(()); // 已注册：防枚举，不发信
+        }
+        self.audit(None, AuditAction::SignupRequested, format!("email={email}"), client_ip).await;
+
+        let expires_at = chrono::Utc::now()
+            + chrono::Duration::minutes(self.config.email_verification_ttl_mins);
+        // 通道一：6 位数字验证码（App 内手动回填）
+        let code = Self::generate_signup_code();
+        // 通道二：确认链接（PC 浏览器完成注册）
+        let link_token = generate_refresh_token();
+        for raw in [&code, &link_token] {
+            self.email_verifications
+                .insert(NewEmailVerification {
+                    id: Uuid::now_v7(),
+                    email: email.to_string(),
+                    token_hash: hash_refresh_token(raw),
+                    purpose: VerificationPurpose::Signup,
+                    user_id: None,
+                    expires_at,
+                })
+                .await?;
+        }
+        let link = format!(
+            "{}/api/auth/signup/confirm?token={}",
+            self.verify_url_base, link_token
+        );
+        let html = Self::signup_email_html(email, &code, &link);
+        if let Err(e) = self.mail.send(email, "Rovortex 注册验证", &html).await {
+            tracing::warn!(email, error = %e, "failed to send signup email");
+        }
+        Ok(())
+    }
+
+    /// 验证码通道确认注册：码 + 密码（App 暂存回传）→ 建号 + 会话。
+    ///
+    /// 建号即视为邮箱已验证（收码权即邮箱归属证明）。限流由表现层实施。
+    pub async fn confirm_signup_code(
+        &self,
+        email: &str,
+        code: &str,
+        password: &str,
+        username: Option<&str>,
+        client_ip: &str,
+        ctx: &SessionContext,
+    ) -> Result<Session, UserError> {
+        let (verified_email, _purpose, _) = self
+            .email_verifications
+            .consume_by_hash(&hash_refresh_token(code))
+            .await?
+            .ok_or(UserError::InvalidSignupCode)?;
+        if _purpose != VerificationPurpose::Signup || !verified_email.eq_ignore_ascii_case(email) {
+            return Err(UserError::InvalidSignupCode);
+        }
+        self.create_verified_user(&verified_email, password, username, client_ip, ctx)
+            .await
+    }
+
+    /// 链接通道确认注册：PC 浏览器表单提交（token + 密码）→ 建号。
+    pub async fn confirm_signup_link(
+        &self,
+        raw_token: &str,
+        password: &str,
+        client_ip: &str,
+        ctx: &SessionContext,
+    ) -> Result<Session, UserError> {
+        let (email, purpose, _) = self
+            .email_verifications
+            .consume_by_hash(&hash_refresh_token(raw_token))
+            .await?
+            .ok_or(UserError::InvalidSignupCode)?;
+        if purpose != VerificationPurpose::Signup {
+            return Err(UserError::InvalidSignupCode);
+        }
+        self.create_verified_user(&email, password, None, client_ip, ctx)
+            .await
+    }
+
+    /// 建号（邮箱已验证语义）：密码/用户名校验 + 唯一性检查 + email_verified=true。
+    /// 并发撞车由仓储层唯一索引兜底。
+    async fn create_verified_user(
+        &self,
+        email: &str,
+        password: &str,
+        username: Option<&str>,
+        client_ip: &str,
+        ctx: &SessionContext,
+    ) -> Result<Session, UserError> {
+        self.validate_password_len(password)?;
+        if let Some(name) = username {
+            validate_username(name)?;
+            if self.repo.find_by_username(name).await?.is_some() {
+                return Err(UserError::UsernameTaken(name.into()));
+            }
+        }
+        if self.repo.find_by_email(email).await?.is_some() {
+            return Err(UserError::EmailTaken(email.into()));
+        }
+        let password_hash = hash_password(password)?;
+        let username = match username {
+            Some(name) => name.to_string(),
+            None => self.unique_username_from(email, None).await?,
+        };
+        let mut user = self
+            .repo
+            .create(NewUser {
+                username,
+                email: email.into(),
+                password_hash: Some(password_hash),
+            })
+            .await?;
+        self.repo.mark_email_verified(user.id).await?;
+        user.email_verified = true;
+        self.audit(
+            Some(user.id),
+            AuditAction::Register,
+            format!("username={} verified=true", user.username),
+            client_ip,
+        ).await;
+        self.issue_session(user, ctx).await
+    }
+
+    /// 生成 6 位数字注册验证码（字符串形式；哈希后落 email_verifications）。
+    fn generate_signup_code() -> String {
+        use rand_core::{OsRng, RngCore};
+        // 6 位数字空间 10^6；confirm 端点限流（表现层）使爆破不可行。
+        format!("{:06}", OsRng.next_u32() % 1_000_000)
+    }
+
+    /// 注册验证邮件 HTML 模板：验证码 + 确认链接双通道。
+    fn signup_email_html(email: &str, code: &str, link: &str) -> String {
+        format!(
+            r#"<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+  <h2>注册 Rovortex</h2>
+  <p>你好 {email}，你的注册验证码（15 分钟内有效）：</p>
+  <p style="font-size:32px;letter-spacing:8px;font-weight:bold;color:#4f46e5;margin:16px 0">{code}</p>
+  <p style="color:#555">在应用中输入此验证码即可完成注册。</p>
+  <p style="color:#555">也可以在电脑上点击下面的链接完成注册：</p>
+  <p><a href="{link}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px">在浏览器中完成注册</a></p>
+  <p style="color:#888;font-size:13px">如果你没有注册过 Rovortex，请忽略本邮件。</p>
+</div>"#,
+            email = email,
+            code = code,
+            link = link
+        )
+    }
+
     /// 请求注册邮箱验证：给指定邮箱发确认信。
     ///
     /// 防枚举：无论邮箱是否已注册，都返回 Ok（不泄露注册状态）。
@@ -807,16 +970,18 @@ impl UserService {
             .await
     }
 
-    /// 忘记密码：给邮箱发重置链接（一次性，15 分钟有效）。    ///
-    /// 防枚举：未注册邮箱不发信但恒返回 Ok（不泄露注册状态）。
+    /// 忘记密码：给邮箱发重置凭据（6 位码 + 链接双通道，一次性，15 分钟有效）。
+    ///
+    /// 防枚举：未注册 / 无密码 / 邮箱未验证的账号不发信但恒返回 Ok（不泄露注册状态）。
     /// 只对有密码的账号发信——纯 OAuth/Magic 用户无需密码重置。
+    /// verified 门：未验证邮箱的账号不参与密码重置——否则填错邮箱即可重置接管。
     /// 发信失败不阻断流程（用户可重发），只记录。
     pub async fn request_password_reset(&self, email: &str, client_ip: &str) -> Result<(), UserError> {
         validate_email(email)?;
         let Some(user) = self.repo.find_by_email(email).await? else {
             return Ok(());
         };
-        if user.password_hash.is_none() {
+        if user.password_hash.is_none() || !user.email_verified {
             return Ok(());
         }
         self.audit(
@@ -825,23 +990,26 @@ impl UserService {
             format!("email={email}"),
             client_ip,
         ).await;
+        let code = Self::generate_signup_code();
         let raw = generate_refresh_token();
-        self.email_verifications
-            .insert(NewEmailVerification {
-                id: Uuid::now_v7(),
-                email: email.to_string(),
-                token_hash: hash_refresh_token(&raw),
-                purpose: VerificationPurpose::PasswordReset,
-                user_id: Some(user.id),
-                expires_at: chrono::Utc::now()
-                    + chrono::Duration::minutes(self.config.email_verification_ttl_mins),
-            })
-            .await?;
+        for token in [&code, &raw] {
+            self.email_verifications
+                .insert(NewEmailVerification {
+                    id: Uuid::now_v7(),
+                    email: email.to_string(),
+                    token_hash: hash_refresh_token(token),
+                    purpose: VerificationPurpose::PasswordReset,
+                    user_id: Some(user.id),
+                    expires_at: chrono::Utc::now()
+                        + chrono::Duration::minutes(self.config.email_verification_ttl_mins),
+                })
+                .await?;
+        }
         let link = format!(
             "{}/api/auth/password-reset/confirm?token={}",
             self.verify_url_base, raw
         );
-        let html = password_reset_email_html(&user.username, &link);
+        let html = password_reset_email_html(&user.username, &code, &link);
         if let Err(e) = self.mail.send(email, "Rovortex 密码重置", &html).await {
             tracing::warn!(email, error = %e, "failed to send password reset mail");
         }
@@ -873,6 +1041,37 @@ impl UserService {
         self.repo.update_password_hash(user_id, &new_hash).await?;
         self.refresh.revoke_all_for_user(user_id).await?;
         self.audit(Some(user_id), AuditAction::PasswordChanged, "password_reset", client_ip).await;
+        Ok(())
+    }
+
+    /// 码通道确认密码重置：App 端填 6 位码。语义同 confirm_password_reset，
+    /// 另校验码所属邮箱与请求邮箱一致（防跨账号用码）。
+    pub async fn confirm_password_reset_code(
+        &self,
+        email: &str,
+        code: &str,
+        new_password: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
+        self.validate_password_len(new_password)?;
+        let token_hash = hash_refresh_token(code);
+        let (verified_email, purpose, user_id) = self
+            .email_verifications
+            .consume_by_hash(&token_hash)
+            .await?
+            .ok_or(UserError::InvalidRefreshToken)?;
+        if purpose != VerificationPurpose::PasswordReset
+            || !verified_email.eq_ignore_ascii_case(email)
+        {
+            return Err(UserError::InvalidRefreshToken);
+        }
+        let Some(user_id) = user_id else {
+            return Err(UserError::InvalidRefreshToken);
+        };
+        let new_hash = hash_password(new_password)?;
+        self.repo.update_password_hash(user_id, &new_hash).await?;
+        self.refresh.revoke_all_for_user(user_id).await?;
+        self.audit(Some(user_id), AuditAction::PasswordChanged, "password_reset_code", client_ip).await;
         Ok(())
     }
 
@@ -1212,11 +1411,13 @@ fn magic_link_email_html(email: &str, link: &str) -> String {
 }
 
 /// 密码重置邮件 HTML 模板。
-fn password_reset_email_html(username: &str, link: &str) -> String {
+fn password_reset_email_html(username: &str, code: &str, link: &str) -> String {
     format!(
         r#"<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
   <h2>你好，{username}</h2>
-  <p>你请求重置账号密码。请点击下面的链接设置新密码（15 分钟内有效，仅可使用一次）：</p>
+  <p>你请求重置账号密码。在应用中输入此验证码设置新密码（15 分钟内有效，仅可使用一次）：</p>
+  <p style="font-size:32px;letter-spacing:8px;font-weight:bold;color:#4f46e5;margin:16px 0">{code}</p>
+  <p style="color:#555">也可以在电脑上点击下面的链接设置新密码：</p>
   <p><a href="{link}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px">重置密码</a></p>
   <p style="color:#888;font-size:13px">重置成功后，你之前的所有登录会话将被吊销。</p>
   <p style="color:#888;font-size:13px">如果你没有请求重置密码，请忽略本邮件，你的密码不会被更改。</p>
@@ -1917,7 +2118,7 @@ mod tests {
     async fn register_then_login_with_username_or_email() {
         let svc = service();
         let session = svc
-            .register("alice", "alice@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .register(Some("alice"), "alice@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         assert_eq!(session.user.username, "alice");
@@ -1937,7 +2138,7 @@ mod tests {
     async fn refresh_rotates_token_and_old_becomes_invalid() {
         let svc = service();
         let s1 = svc
-            .register("dora", "dora@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .register(Some("dora"), "dora@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
 
@@ -1958,7 +2159,7 @@ mod tests {
     async fn logout_revokes_and_is_idempotent() {
         let svc = service();
         let s = svc
-            .register("erin", "erin@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .register(Some("erin"), "erin@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         svc.logout(&s.refresh_token, "127.0.0.1").await.unwrap();
@@ -1974,7 +2175,7 @@ mod tests {
     async fn change_password_requires_old_and_revokes_sessions() {
         let svc = service();
         let s = svc
-            .register("frank", "frank@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .register(Some("frank"), "frank@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
 
@@ -2001,23 +2202,23 @@ mod tests {
     #[tokio::test]
     async fn duplicate_username_and_email_are_rejected() {
         let svc = service();
-        svc.register("bob", "bob@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+        svc.register(Some("bob"), "bob@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
 
         assert!(matches!(
-            svc.register("bob", "other@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            svc.register(Some("bob"), "other@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
                 .await,
             Err(UserError::UsernameTaken(_))
         ));
         assert!(matches!(
-            svc.register("bobby", "bob@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            svc.register(None, "bob@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
                 .await,
             Err(UserError::EmailTaken(_))
         ));
         // 大小写不敏感的唯一性
         assert!(matches!(
-            svc.register("BOB", "uppercase@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            svc.register(Some("BOB"), "uppercase@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
                 .await,
             Err(UserError::UsernameTaken(_))
         ));
@@ -2026,7 +2227,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_password_or_unknown_user_is_invalid_credentials() {
         let svc = service();
-        svc.register("carol", "carol@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+        svc.register(None, "carol@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
 
@@ -2044,24 +2245,40 @@ mod tests {
     async fn validation_errors() {
         let svc = service();
         assert!(matches!(
-            svc.register("ab", "x@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await,
+            svc.register(Some("ab"), "x@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidUsername(_))
         ));
         assert!(matches!(
-            svc.register("valid", "not-an-email", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await,
+            svc.register(None, "not-an-email", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidEmail(_))
         ));
         assert!(matches!(
-            svc.register("valid", "x@example.com", "short", "127.0.0.1", &SessionContext::default()).await,
+            svc.register(None, "x@example.com", "short", "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::InvalidPassword(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn register_without_username_generates_unique_from_email() {
+        let svc = service();
+        let s1 = svc
+            .register(None, "nina@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .await
+            .unwrap();
+        assert_eq!(s1.user.username, "nina", "generated from email prefix");
+        // 同邮箱前缀再注册：自动加后缀（nina 已被占）
+        let s2 = svc
+            .register(None, "nina@other.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .await
+            .unwrap();
+        assert_eq!(s2.user.username, "nina2", "suffix on conflict");
     }
 
     #[tokio::test]
     async fn email_verification_flow_marks_user_verified() {
         let (svc, sent) = service_with_mail(TestMailSender::default());
         let s = svc
-            .register("grace", "grace@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .register(Some("grace"), "grace@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         assert!(!s.user.email_verified);
@@ -2100,7 +2317,7 @@ mod tests {
     async fn email_change_flow_updates_email_after_confirm() {
         let (svc, sent) = service_with_mail(TestMailSender::default());
         let s = svc
-            .register("henry", "henry@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .register(Some("henry"), "henry@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
 
@@ -2109,7 +2326,7 @@ mod tests {
         assert_eq!(sent.sent.lock().unwrap().len(), 0);
 
         // 新邮箱已被他人占用 → 拒绝
-        svc.register("iris", "iris@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
+        svc.register(None, "iris@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
         assert!(matches!(
             svc.request_email_change(s.user.id, "iris@example.com", "127.0.0.1").await,
             Err(UserError::EmailTaken(_))
@@ -2134,7 +2351,7 @@ mod tests {
         assert!(user.email_verified, "new email auto-verified");
 
         // 旧邮箱已释放，可被他人注册
-        assert!(svc.register("jack", "henry@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.is_ok());
+        assert!(svc.register(None, "henry@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.is_ok());
     }
 
     /// 从确认邮件 HTML 的链接中提取 raw token（?token=...）。
@@ -2160,7 +2377,7 @@ mod tests {
                 Arc::new(TestIdentityRepository::new()),
             "http://localhost:8080".to_string(),
         );
-        svc.register("kate", "kate@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default()).await.unwrap();
+        svc.register(None, "kate@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default()).await.unwrap();
 
         // 两次失败 → 计数 2，未锁
         assert!(svc.login("ip:1.2.3.4:kate", "kate", "wrong1", "1.2.3.4", &SessionContext::default()).await.is_err());
@@ -2185,7 +2402,7 @@ mod tests {
                 Arc::new(TestIdentityRepository::new()),
             "http://localhost:8080".to_string(),
         );
-        svc.register("liam", "liam@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default()).await.unwrap();
+        svc.register(None, "liam@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default()).await.unwrap();
 
         svc.login("k:liam", "liam", "bad", "1.1.1.1", &SessionContext::default()).await.unwrap_err();
         svc.login("k:liam", "liam", "bad", "1.1.1.1", &SessionContext::default()).await.unwrap_err();
@@ -2240,7 +2457,7 @@ mod tests {
             "http://localhost:8080".to_string(),
         );
 
-        let s = svc.register("mona", "mona@example.com", "Str0ng-pass!", "2.2.2.2", &SessionContext::default()).await.unwrap();
+        let s = svc.register(None, "mona@example.com", "Str0ng-pass!", "2.2.2.2", &SessionContext::default()).await.unwrap();
         svc.login("k:mona", "mona", "bad", "3.3.3.3", &SessionContext::default()).await.unwrap_err();
         svc.login("k:mona", "mona", "Str0ng-pass!", "3.3.3.3", &SessionContext::default()).await.unwrap();
         svc.change_password(s.user.id, "Str0ng-pass!", "N3w-pass-word!", "4.4.4.4").await.unwrap();
@@ -2283,7 +2500,7 @@ mod tests {
         let svc = service();
         // 先用密码注册
         let password_user = svc
-            .register("oscar", "oscar@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .register(Some("oscar"), "oscar@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         // GitHub 身份首次登录：同邮箱 → 挂到既有账号
@@ -2306,7 +2523,7 @@ mod tests {
     async fn oauth_username_conflict_gets_suffix() {
         let svc = service();
         // 占用 nina 用户名
-        svc.register("nina", "nina-plain@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+        svc.register(Some("nina"), "nina-plain@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         // GitHub 邮箱前缀同为 nina → 自动去重为 nina2
@@ -2388,7 +2605,7 @@ mod tests {
         ));
 
         // 跨用途：signup token 不能当 magic link 用
-        svc.register("tess", "tess@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
+        svc.register(None, "tess@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
         svc.request_email_verification("tess@example.com", "127.0.0.1").await.unwrap();
         let mails = sent.sent.lock().unwrap();
         let signup_raw = extract_token_from_html(&mails[1].2);
@@ -2411,7 +2628,7 @@ mod tests {
     async fn change_username_validates_takes_and_updates() {
         let svc = service();
         let s = svc
-            .register("ursula", "ursula@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
+            .register(Some("ursula"), "ursula@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
             .await
             .unwrap();
 
@@ -2423,7 +2640,7 @@ mod tests {
 
         // 与他人冲突
         let _ = svc
-            .register("victor", "victor@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
+            .register(Some("victor"), "victor@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
             .await
             .unwrap();
         assert!(matches!(
@@ -2439,7 +2656,7 @@ mod tests {
 
         // 旧用户名可被他人注册
         assert!(svc
-            .register("ursula", "ursula-new@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
+            .register(Some("ursula"), "ursula-new@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
             .await
             .is_ok());
     }
@@ -2448,10 +2665,16 @@ mod tests {
     async fn password_reset_full_flow_changes_password_and_revokes_sessions() {
         let (svc, sent) = service_with_mail(TestMailSender::default());
         let s = svc
-            .register("marc", "marc@example.com", "0ld-pass-word!", "9.9.9.9", &SessionContext::default())
+            .register(Some("marc"), "marc@example.com", "0ld-pass-word!", "9.9.9.9", &SessionContext::default())
             .await
             .unwrap();
 
+        // 未验证邮箱：不发信（verified 门，关接管洞）
+        svc.request_password_reset("marc@example.com", "9.9.9.9").await.unwrap();
+        assert!(sent.sent.lock().unwrap().is_empty(), "unverified email gets no reset mail");
+
+        // 验证邮箱后：发码+链接，码通道改密成功
+        svc.repository().mark_email_verified(s.user.id).await.unwrap();
         svc.request_password_reset("marc@example.com", "9.9.9.9").await.unwrap();
         let mails = sent.sent.lock().unwrap();
         assert_eq!(mails.len(), 1, "reset mail sent");
@@ -2474,6 +2697,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(user.password_hash.is_some());
+
+        // 码通道同样可用（新重置请求）
+        svc.request_password_reset("marc@example.com", "9.9.9.9").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let code2 = extract_code_from_html(&mails.last().unwrap().2);
+        drop(mails);
+        svc.confirm_password_reset_code("marc@example.com", &code2, "N3w-pass-word!2", "9.9.9.9").await.unwrap();
+        assert!(svc.login("k:p", "marc", "N3w-pass-word!2", "1.2.3.4", &SessionContext::default()).await.is_ok());
     }
 
     #[tokio::test]
@@ -2533,7 +2764,7 @@ mod tests {
     async fn update_profile_patch_semantics_and_validation() {
         let svc = service();
         let s = svc
-            .register("quinn", "quinn@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
+            .register(Some("quinn"), "quinn@example.com", "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
             .await
             .unwrap();
 
@@ -2628,7 +2859,7 @@ mod tests {
     async fn sessions_list_and_revoke() {
         let svc = service();
         let s1 = svc
-            .register("fresh1", "fresh1@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .register(Some("fresh1"), "fresh1@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         // 第二次登录 = 第二个会话
@@ -2652,7 +2883,7 @@ mod tests {
 
         // 越权：别的用户 id + 该会话 id 查不到
         let other = svc
-            .register("fresh2", "fresh2@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .register(Some("fresh2"), "fresh2@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         assert!(matches!(
@@ -2677,8 +2908,13 @@ mod tests {
         svc.request_password_reset("nora@example.com", "6.6.6.6").await.unwrap();
         assert!(sent.sent.lock().unwrap().is_empty());
 
+        // 未验证邮箱：恒 Ok 且不发信（verified 门）
+        svc.register(Some("vera"), "vera@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
+        svc.request_password_reset("vera@example.com", "6.6.6.6").await.unwrap();
+        assert!(sent.sent.lock().unwrap().is_empty());
+
         // signup token 不能当 password_reset 用
-        svc.register("paul", "paul@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
+        svc.register(None, "paul@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
         svc.request_email_verification("paul@example.com", "127.0.0.1").await.unwrap();
         let mails = sent.sent.lock().unwrap();
         let signup_raw = extract_token_from_html(&mails[0].2);
@@ -2690,11 +2926,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn password_reset_code_rejects_wrong_email_and_replays() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+        let s = svc
+            .register(Some("cody"), "cody@example.com", "0ld-pass-word!", "9.9.9.9", &SessionContext::default())
+            .await
+            .unwrap();
+        svc.repository().mark_email_verified(s.user.id).await.unwrap();
+
+        svc.request_password_reset("cody@example.com", "9.9.9.9").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let code = extract_code_from_html(&mails[0].2);
+        drop(mails);
+
+        // 正确邮箱 + 正确码（大小写不敏感）：成功并吊销旧会话
+        svc.confirm_password_reset_code("CODY@example.com", &code, "N3w-pass-word!", "9.9.9.9").await.unwrap();
+        assert!(svc.login("k:p", "cody", "N3w-pass-word!", "1.2.3.4", &SessionContext::default()).await.is_ok());
+        // 一次性：重放失败
+        assert!(matches!(
+            svc.confirm_password_reset_code("cody@example.com", &code, "N3w-pass-word!", "9.9.9.9").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
+        // 重放也作废后：他人邮箱 + 此码同样拒绝（码绑定邮箱）
+        assert!(matches!(
+            svc.confirm_password_reset_code("someone-else@example.com", &code, "N3w-pass-word!", "9.9.9.9").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
+    }
+
+    #[tokio::test]
     async fn account_deletion_soft_delete_and_recovery_flow() {
         let (svc, sent) = service_with_mail(TestMailSender::default());
 
         let reg = svc
-            .register("delme", "delme@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .register(Some("delme"), "delme@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         let user_id = reg.user.id;
@@ -2715,13 +2980,13 @@ mod tests {
 
         // 冷静期内注册同邮箱：被保留占位挡住（EmailTaken）
         assert!(matches!(
-            svc.register("delme2", "delme@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await,
+            svc.register(None, "delme@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await,
             Err(UserError::EmailTaken(_))
         ));
 
         // 他人 token 不能恢复我的账号
         let other = svc
-            .register("keeper", "keeper@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .register(Some("keeper"), "keeper@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
             .await
             .unwrap();
         svc.request_account_deletion(other.user.id, "127.0.0.1").await.unwrap();
@@ -2759,6 +3024,109 @@ mod tests {
         assert!(matches!(
             svc.confirm_account_recovery(&rec_raw, "127.0.0.1").await,
             Err(UserError::InvalidRefreshToken)
+        ));
+    }
+
+    /// 从注册邮件 HTML 中提取 6 位验证码。
+    fn extract_code_from_html(html: &str) -> String {
+        let marker = "margin:16px 0\">";
+        let start = html.find(marker).expect("code in signup email html") + marker.len();
+        html[start..start + 6].to_string()
+    }
+
+    #[tokio::test]
+    async fn signup_code_flow_creates_verified_user() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+
+        // 已注册邮箱：防枚举，不发信
+        svc.register(Some("tina"), "tina@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
+        svc.request_signup("tina@example.com", "9.9.9.9").await.unwrap();
+        assert!(sent.sent.lock().unwrap().is_empty());
+
+        // 未注册邮箱：发信（码 + 链接双通道）
+        svc.request_signup("vada@example.com", "9.9.9.9").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        assert_eq!(mails.len(), 1, "signup mail sent");
+        assert_eq!(mails[0].0, "vada@example.com");
+        let code = extract_code_from_html(&mails[0].2);
+        let link_raw = extract_token_from_html(&mails[0].2);
+        drop(mails);
+
+        // 建号前：邮箱不存在
+        assert!(svc.repository().find_by_email("vada@example.com").await.unwrap().is_none());
+
+        // 错码：拒绝且不建号
+        assert!(matches!(
+            svc.confirm_signup_code("vada@example.com", "000000", "Str0ng-pass!", None, "9.9.9.9", &SessionContext::default()).await,
+            Err(UserError::InvalidSignupCode)
+        ));
+
+        // 正确码 + 建号 + 直接是 verified
+        let s = svc
+            .confirm_signup_code("vada@example.com", &code, "Str0ng-pass!", None, "9.9.9.9", &SessionContext::default())
+            .await
+            .unwrap();
+        assert!(s.user.email_verified, "signup confirm = verified");
+        assert_eq!(s.user.username, "vada", "auto from email prefix");
+        assert!(!s.refresh_token.is_empty());
+
+        // 码一次性：复用失败
+        assert!(matches!(
+            svc.confirm_signup_code("vada@example.com", &code, "Str0ng-pass!", None, "9.9.9.9", &SessionContext::default()).await,
+            Err(UserError::InvalidSignupCode)
+        ));
+
+        // 密码登录可用
+        let by_password = svc
+            .login("k:v", "vada@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .await
+            .unwrap();
+        assert_eq!(by_password.user.id, s.user.id);
+
+        // 链接通道仍可用？不——链接 token 是另一条记录，但账号已存在；
+        // 链接确认会撞 EmailTaken。防御：链接确认对已存在邮箱报错。
+        assert!(matches!(
+            svc.confirm_signup_link(&link_raw, "An0ther-pass!", "9.9.9.9", &SessionContext::default()).await,
+            Err(UserError::EmailTaken(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn signup_link_flow_creates_verified_user() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+        svc.request_signup("wendy@example.com", "9.9.9.9").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let link_raw = extract_token_from_html(&mails[0].2);
+        drop(mails);
+
+        let s = svc
+            .confirm_signup_link(&link_raw, "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
+            .await
+            .unwrap();
+        assert!(s.user.email_verified);
+        assert_eq!(s.user.username, "wendy");
+
+        // 交叉用途：signup link token 不能当 password_reset 用
+        assert!(matches!(
+            svc.confirm_password_reset(&link_raw, "N3w-pass-word!", "6.6.6.6").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
+
+        // 登录可用
+        assert!(svc.login("k:w", "wendy@example.com", "Str0ng-pass!", "1.1.1.1", &SessionContext::default()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn signup_code_rejected_for_other_email() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+        svc.request_signup("xena@example.com", "9.9.9.9").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let code = extract_code_from_html(&mails[0].2);
+        drop(mails);
+        // 码发给 xena，却声明是别邮箱 → 拒绝
+        assert!(matches!(
+            svc.confirm_signup_code("yuri@example.com", &code, "Str0ng-pass!", None, "9.9.9.9", &SessionContext::default()).await,
+            Err(UserError::InvalidSignupCode)
         ));
     }
 }
