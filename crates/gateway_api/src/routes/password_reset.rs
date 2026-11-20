@@ -1,7 +1,8 @@
-//! 找回密码：发重置邮件 / 邮件内表单提交新密码。
+//! 找回密码：发重置邮件（6 位码 + 链接双凭据）/ 邮件内表单提交新密码。
 //!
-//! 防枚举与频率限制语义同 magic.rs：request 恒 202（未注册/无密码邮箱不发信），
-//! 发信走进程内 MailRateLimiter（同邮箱 1 分钟 1 条）。
+//! 防枚举与频率限制语义同 magic.rs：request 恒 202（未注册/无密码/未验证
+//! 邮箱不发信），发信走进程内 MailRateLimiter（同邮箱 1 分钟 1 条）。
+//! 码通道确认走 ConfirmCodeLimiter（5 次/15 分钟 per ip|email，同 signup）。
 
 use axum::extract::{ConnectInfo, Form, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -32,6 +33,34 @@ pub async fn request_reset(
     }
     state.users.request_password_reset(&req.email, &ip).await?;
     Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfirmCodeBody {
+    pub email: String,
+    pub code: String,
+    pub new_password: String,
+}
+
+/// POST /api/auth/password-reset/confirm-code —— App 端码通道设置新密码。
+/// 错误码统一 401 invalid_credentials（与链接通道一致），不泄露具体原因；
+/// 尝试限流走 ConfirmCodeLimiter（5 次/15 分钟 per ip|email）。
+pub async fn confirm_code(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<ConfirmCodeBody>,
+) -> Result<StatusCode, ApiError> {
+    let ip = client_ip(&headers, addr);
+    let key = format!("{}|{}", ip, req.email.to_lowercase());
+    if let Err(reason) = state.confirm_code_limiter.check(&key) {
+        return Err(ApiError::too_many_requests(reason));
+    }
+    state
+        .users
+        .confirm_password_reset_code(&req.email, &req.code, &req.new_password, &ip)
+        .await?;
+    Ok(StatusCode::OK)
 }
 
 #[derive(Debug, Deserialize)]

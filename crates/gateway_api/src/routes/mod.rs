@@ -88,6 +88,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/magic-link", post(magic::request_magic_link))
         .route("/api/auth/magic-link/verify", get(magic::verify_magic_link))
         .route("/api/auth/password-reset/request", post(password_reset::request_reset))
+        .route("/api/auth/password-reset/confirm-code", post(password_reset::confirm_code))
         .route("/api/auth/password-reset/confirm", get(password_reset::confirm_form).post(password_reset::confirm_submit))
         .route("/api/auth/account/recover", post(account::request_recovery))
         .route("/api/auth/account/confirm-deletion", get(account::confirm_deletion))

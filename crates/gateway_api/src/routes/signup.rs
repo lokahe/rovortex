@@ -65,7 +65,7 @@ impl ConfirmCodeLimiter {
         Self { attempts: Mutex::new(HashMap::new()) }
     }
 
-    fn check(&self, key: &str) -> Result<(), &'static str> {
+    pub fn check(&self, key: &str) -> Result<(), &'static str> {
         let now = Instant::now();
         let mut attempts = self.attempts.lock().unwrap();
         let hist = attempts.entry(key.to_string()).or_default();

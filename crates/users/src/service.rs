@@ -970,16 +970,18 @@ impl UserService {
             .await
     }
 
-    /// 忘记密码：给邮箱发重置链接（一次性，15 分钟有效）。    ///
-    /// 防枚举：未注册邮箱不发信但恒返回 Ok（不泄露注册状态）。
+    /// 忘记密码：给邮箱发重置凭据（6 位码 + 链接双通道，一次性，15 分钟有效）。
+    ///
+    /// 防枚举：未注册 / 无密码 / 邮箱未验证的账号不发信但恒返回 Ok（不泄露注册状态）。
     /// 只对有密码的账号发信——纯 OAuth/Magic 用户无需密码重置。
+    /// verified 门：未验证邮箱的账号不参与密码重置——否则填错邮箱即可重置接管。
     /// 发信失败不阻断流程（用户可重发），只记录。
     pub async fn request_password_reset(&self, email: &str, client_ip: &str) -> Result<(), UserError> {
         validate_email(email)?;
         let Some(user) = self.repo.find_by_email(email).await? else {
             return Ok(());
         };
-        if user.password_hash.is_none() {
+        if user.password_hash.is_none() || !user.email_verified {
             return Ok(());
         }
         self.audit(
@@ -988,23 +990,26 @@ impl UserService {
             format!("email={email}"),
             client_ip,
         ).await;
+        let code = Self::generate_signup_code();
         let raw = generate_refresh_token();
-        self.email_verifications
-            .insert(NewEmailVerification {
-                id: Uuid::now_v7(),
-                email: email.to_string(),
-                token_hash: hash_refresh_token(&raw),
-                purpose: VerificationPurpose::PasswordReset,
-                user_id: Some(user.id),
-                expires_at: chrono::Utc::now()
-                    + chrono::Duration::minutes(self.config.email_verification_ttl_mins),
-            })
-            .await?;
+        for token in [&code, &raw] {
+            self.email_verifications
+                .insert(NewEmailVerification {
+                    id: Uuid::now_v7(),
+                    email: email.to_string(),
+                    token_hash: hash_refresh_token(token),
+                    purpose: VerificationPurpose::PasswordReset,
+                    user_id: Some(user.id),
+                    expires_at: chrono::Utc::now()
+                        + chrono::Duration::minutes(self.config.email_verification_ttl_mins),
+                })
+                .await?;
+        }
         let link = format!(
             "{}/api/auth/password-reset/confirm?token={}",
             self.verify_url_base, raw
         );
-        let html = password_reset_email_html(&user.username, &link);
+        let html = password_reset_email_html(&user.username, &code, &link);
         if let Err(e) = self.mail.send(email, "Rovortex 密码重置", &html).await {
             tracing::warn!(email, error = %e, "failed to send password reset mail");
         }
@@ -1036,6 +1041,37 @@ impl UserService {
         self.repo.update_password_hash(user_id, &new_hash).await?;
         self.refresh.revoke_all_for_user(user_id).await?;
         self.audit(Some(user_id), AuditAction::PasswordChanged, "password_reset", client_ip).await;
+        Ok(())
+    }
+
+    /// 码通道确认密码重置：App 端填 6 位码。语义同 confirm_password_reset，
+    /// 另校验码所属邮箱与请求邮箱一致（防跨账号用码）。
+    pub async fn confirm_password_reset_code(
+        &self,
+        email: &str,
+        code: &str,
+        new_password: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
+        self.validate_password_len(new_password)?;
+        let token_hash = hash_refresh_token(code);
+        let (verified_email, purpose, user_id) = self
+            .email_verifications
+            .consume_by_hash(&token_hash)
+            .await?
+            .ok_or(UserError::InvalidRefreshToken)?;
+        if purpose != VerificationPurpose::PasswordReset
+            || !verified_email.eq_ignore_ascii_case(email)
+        {
+            return Err(UserError::InvalidRefreshToken);
+        }
+        let Some(user_id) = user_id else {
+            return Err(UserError::InvalidRefreshToken);
+        };
+        let new_hash = hash_password(new_password)?;
+        self.repo.update_password_hash(user_id, &new_hash).await?;
+        self.refresh.revoke_all_for_user(user_id).await?;
+        self.audit(Some(user_id), AuditAction::PasswordChanged, "password_reset_code", client_ip).await;
         Ok(())
     }
 
@@ -1375,11 +1411,13 @@ fn magic_link_email_html(email: &str, link: &str) -> String {
 }
 
 /// 密码重置邮件 HTML 模板。
-fn password_reset_email_html(username: &str, link: &str) -> String {
+fn password_reset_email_html(username: &str, code: &str, link: &str) -> String {
     format!(
         r#"<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
   <h2>你好，{username}</h2>
-  <p>你请求重置账号密码。请点击下面的链接设置新密码（15 分钟内有效，仅可使用一次）：</p>
+  <p>你请求重置账号密码。在应用中输入此验证码设置新密码（15 分钟内有效，仅可使用一次）：</p>
+  <p style="font-size:32px;letter-spacing:8px;font-weight:bold;color:#4f46e5;margin:16px 0">{code}</p>
+  <p style="color:#555">也可以在电脑上点击下面的链接设置新密码：</p>
   <p><a href="{link}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px">重置密码</a></p>
   <p style="color:#888;font-size:13px">重置成功后，你之前的所有登录会话将被吊销。</p>
   <p style="color:#888;font-size:13px">如果你没有请求重置密码，请忽略本邮件，你的密码不会被更改。</p>
@@ -2631,6 +2669,12 @@ mod tests {
             .await
             .unwrap();
 
+        // 未验证邮箱：不发信（verified 门，关接管洞）
+        svc.request_password_reset("marc@example.com", "9.9.9.9").await.unwrap();
+        assert!(sent.sent.lock().unwrap().is_empty(), "unverified email gets no reset mail");
+
+        // 验证邮箱后：发码+链接，码通道改密成功
+        svc.repository().mark_email_verified(s.user.id).await.unwrap();
         svc.request_password_reset("marc@example.com", "9.9.9.9").await.unwrap();
         let mails = sent.sent.lock().unwrap();
         assert_eq!(mails.len(), 1, "reset mail sent");
@@ -2653,6 +2697,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(user.password_hash.is_some());
+
+        // 码通道同样可用（新重置请求）
+        svc.request_password_reset("marc@example.com", "9.9.9.9").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let code2 = extract_code_from_html(&mails.last().unwrap().2);
+        drop(mails);
+        svc.confirm_password_reset_code("marc@example.com", &code2, "N3w-pass-word!2", "9.9.9.9").await.unwrap();
+        assert!(svc.login("k:p", "marc", "N3w-pass-word!2", "1.2.3.4", &SessionContext::default()).await.is_ok());
     }
 
     #[tokio::test]
@@ -2856,6 +2908,11 @@ mod tests {
         svc.request_password_reset("nora@example.com", "6.6.6.6").await.unwrap();
         assert!(sent.sent.lock().unwrap().is_empty());
 
+        // 未验证邮箱：恒 Ok 且不发信（verified 门）
+        svc.register(Some("vera"), "vera@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
+        svc.request_password_reset("vera@example.com", "6.6.6.6").await.unwrap();
+        assert!(sent.sent.lock().unwrap().is_empty());
+
         // signup token 不能当 password_reset 用
         svc.register(None, "paul@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
         svc.request_email_verification("paul@example.com", "127.0.0.1").await.unwrap();
@@ -2864,6 +2921,35 @@ mod tests {
         drop(mails);
         assert!(matches!(
             svc.confirm_password_reset(&signup_raw, "N3w-pass-word!", "6.6.6.6").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn password_reset_code_rejects_wrong_email_and_replays() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+        let s = svc
+            .register(Some("cody"), "cody@example.com", "0ld-pass-word!", "9.9.9.9", &SessionContext::default())
+            .await
+            .unwrap();
+        svc.repository().mark_email_verified(s.user.id).await.unwrap();
+
+        svc.request_password_reset("cody@example.com", "9.9.9.9").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let code = extract_code_from_html(&mails[0].2);
+        drop(mails);
+
+        // 正确邮箱 + 正确码（大小写不敏感）：成功并吊销旧会话
+        svc.confirm_password_reset_code("CODY@example.com", &code, "N3w-pass-word!", "9.9.9.9").await.unwrap();
+        assert!(svc.login("k:p", "cody", "N3w-pass-word!", "1.2.3.4", &SessionContext::default()).await.is_ok());
+        // 一次性：重放失败
+        assert!(matches!(
+            svc.confirm_password_reset_code("cody@example.com", &code, "N3w-pass-word!", "9.9.9.9").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
+        // 重放也作废后：他人邮箱 + 此码同样拒绝（码绑定邮箱）
+        assert!(matches!(
+            svc.confirm_password_reset_code("someone-else@example.com", &code, "N3w-pass-word!", "9.9.9.9").await,
             Err(UserError::InvalidRefreshToken)
         ));
     }
