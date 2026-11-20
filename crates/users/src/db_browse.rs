@@ -1,10 +1,11 @@
-//! 管理端数据库浏览（只读）—— 业务层契约与领域规则。
+//! 管理端数据库浏览（读 + 行级增删改）—— 业务层契约与领域规则。
 //!
-//! 这里只定义：允许浏览哪些表、哪些列算敏感、行数据如何打码；
-//! 具体查询由持久化层实现（storage_pg::PgDbBrowser）。
-//! 网关层只做参数解析与 DTO 映射，不接触 SQL。
+//! 这里只定义：允许浏览哪些表、哪些列可写；具体查询由持久化层实现
+//! （storage_pg::PgDbBrowser）。网关层只做参数解析与 DTO 映射，不接触 SQL。
+//! 管理端是信任边界内的运维工具：列值原样展示（不打码），全列可编辑。
 
 use serde_json::Value;
+use uuid::Uuid;
 
 /// 允许浏览的表白名单（不含 _sqlx_migrations 等内部表）。
 pub const BROWSABLE_TABLES: &[&str] = &[
@@ -15,8 +16,11 @@ pub const BROWSABLE_TABLES: &[&str] = &[
     "user_identities",
 ];
 
-/// 值打码的敏感列：只暴露前 8 位 + 长度，足以比对、不足以冒用。
-pub const MASKED_COLUMNS: &[&str] = &["password_hash", "token_hash"];
+/// 不可写列：GENERATED ALWAYS 列（PG 拒绝直接写）。其余全部列均可增改。
+const NON_WRITABLE_COLUMNS: &[(&str, &[&str])] = &[(
+    "users",
+    &["username_key", "email_key"], // GENERATED ALWAYS AS lower(...)
+)];
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbBrowseError {
@@ -24,6 +28,10 @@ pub enum DbBrowseError {
     UnknownTable(String),
     #[error("unknown column: {0}")]
     UnknownColumn(String),
+    #[error("column is not writable: {0}")]
+    ReadOnly(String),
+    #[error("row not found")]
+    RowNotFound,
     #[error("database error: {0}")]
     Database(String),
 }
@@ -66,10 +74,43 @@ pub trait DbBrowser: Send + Sync {
     async fn list_tables(&self) -> Result<Vec<TableSummary>, DbBrowseError>;
     /// 表的列信息（information_schema，ordinal_position 序）。
     async fn describe(&self, table: &str) -> Result<Vec<ColumnInfo>, DbBrowseError>;
-    /// 分页浏览：返回完整行的 JSON 对象数组（敏感列未打码，由 [`mask_rows`] 统一处理）。
+    /// 分页浏览：返回完整行的 JSON 对象数组（原样，不打码）。
     async fn browse_rows(&self, params: &BrowseParams) -> Result<Vec<Value>, DbBrowseError>;
     /// 与 browse_rows 同过滤条件下的行数。
     async fn count_rows(&self, table: &str, search: &str) -> Result<i64, DbBrowseError>;
+    /// 插入一行：列须属于该表且非 GENERATED。返回新行 id。
+    async fn insert_row(
+        &self,
+        table: &str,
+        columns: &[(String, Value)],
+    ) -> Result<Uuid, DbBrowseError>;
+    /// 更新一行（按 UUID 主键 id）：列须属于该表且非 GENERATED。
+    async fn update_row(
+        &self,
+        table: &str,
+        id: Uuid,
+        columns: &[(String, Value)],
+    ) -> Result<u64, DbBrowseError>;
+    /// 删除一行（按 UUID 主键 id）。
+    async fn delete_row(&self, table: &str, id: Uuid) -> Result<u64, DbBrowseError>;
+}
+
+/// 挡掉 GENERATED 列；列是否真属于该表由 storage_pg 的 describe 兜底校验。
+pub fn resolve_writable_columns(
+    table: &str,
+    columns: &[(String, Value)],
+) -> Result<(), DbBrowseError> {
+    let blocked = NON_WRITABLE_COLUMNS
+        .iter()
+        .find(|(t, _)| *t == table)
+        .map(|(_, cols)| *cols)
+        .unwrap_or(&[]);
+    for (name, _) in columns {
+        if blocked.contains(&name.as_str()) {
+            return Err(DbBrowseError::ReadOnly(format!("{table}.{name}")));
+        }
+    }
+    Ok(())
 }
 
 /// 校验表名在白名单内。
@@ -96,24 +137,4 @@ pub fn default_sort(columns: &[ColumnInfo]) -> (String, bool) {
         Some(c) => (c.name.clone(), true),
         None => ("id".to_string(), false),
     }
-}
-
-/// 打码敏感列：前 8 字符 + 长度。网关拿到 browse_rows 后必须调用。
-pub fn mask_rows(rows: Vec<Value>) -> Vec<Value> {
-    rows.into_iter()
-        .map(|mut row| {
-            if let Some(obj) = row.as_object_mut() {
-                for col in MASKED_COLUMNS {
-                    if let Some(s) = obj.get(*col).and_then(Value::as_str) {
-                        let prefix: String = s.chars().take(8).collect();
-                        obj.insert(
-                            (*col).to_string(),
-                            serde_json::json!(format!("{prefix}…(len {})", s.len())),
-                        );
-                    }
-                }
-            }
-            row
-        })
-        .collect()
 }

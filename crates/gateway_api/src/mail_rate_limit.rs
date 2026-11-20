@@ -1,14 +1,18 @@
 //! Magic Link 发信频率限制：同邮箱 1 分钟 1 条、1 小时 5 条（进程内实现）。
 //!
 //! 设计稿 AUTH_V2.md §5：量大再换 Redis，结构上只在本模块。
+//! 间隔/上限由组合根注入（`config::mail_rate_limit_config`），本模块不读环境变量。
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const MIN_INTERVAL: Duration = Duration::from_secs(60);
-const HOURLY_LIMIT: usize = 5;
-const HOURLY_WINDOW: Duration = Duration::from_secs(3600);
+/// 邮件限流参数（值对象；环境读取在 config.rs）。
+pub struct MailRateLimitConfig {
+    pub min_interval: Duration,
+    pub hourly_limit: usize,
+    pub hourly_window: Duration,
+}
 
 struct MailboxHistory {
     /// 最近发信时刻（滑窗计数用）。
@@ -22,12 +26,20 @@ impl MailboxHistory {
 }
 
 pub struct MailRateLimiter {
+    min_interval: Duration,
+    hourly_limit: usize,
+    hourly_window: Duration,
     mailboxes: Mutex<std::collections::HashMap<String, MailboxHistory>>,
 }
 
 impl MailRateLimiter {
-    pub fn new() -> Self {
-        Self { mailboxes: Mutex::new(std::collections::HashMap::new()) }
+    pub fn with_config(config: MailRateLimitConfig) -> Self {
+        Self {
+            min_interval: config.min_interval,
+            hourly_limit: config.hourly_limit,
+            hourly_window: config.hourly_window,
+            mailboxes: Mutex::new(std::collections::HashMap::new()),
+        }
     }
 
     /// 允许发信返回 Ok；超限返回 Err（附原因，HTTP 映射为 429）。
@@ -38,20 +50,20 @@ impl MailRateLimiter {
             .entry(email.to_lowercase())
             .or_insert_with(MailboxHistory::new);
 
-        // 清理 1 小时窗口外的旧记录
+        // 清理滑窗外的旧记录
         while hist
             .recent
             .front()
-            .is_some_and(|t| now.duration_since(*t) > HOURLY_WINDOW)
+            .is_some_and(|t| now.duration_since(*t) > self.hourly_window)
         {
             hist.recent.pop_front();
         }
 
-        if hist.recent.len() >= HOURLY_LIMIT {
-            return Err("hourly limit exceeded (5/hour)");
+        if hist.recent.len() >= self.hourly_limit {
+            return Err("hourly limit exceeded");
         }
         if let Some(last) = hist.recent.back() {
-            if now.duration_since(*last) < MIN_INTERVAL {
+            if now.duration_since(*last) < self.min_interval {
                 return Err("please wait a minute before requesting again");
             }
         }
@@ -62,7 +74,7 @@ impl MailRateLimiter {
         mailboxes.retain(|_, h| {
             h.recent
                 .back()
-                .is_some_and(|t| now.duration_since(*t) <= HOURLY_WINDOW)
+                .is_some_and(|t| now.duration_since(*t) <= self.hourly_window)
         });
         Ok(())
     }
@@ -70,7 +82,7 @@ impl MailRateLimiter {
 
 impl Default for MailRateLimiter {
     fn default() -> Self {
-        Self::new()
+        Self::with_config(crate::config::mail_rate_limit_config())
     }
 }
 
@@ -79,29 +91,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn second_send_within_a_minute_is_rejected() {
-        let limiter = MailRateLimiter::new();
+    fn second_send_within_interval_is_rejected() {
+        let limiter = MailRateLimiter::with_config(MailRateLimitConfig {
+            min_interval: Duration::from_secs(60),
+            hourly_limit: 5,
+            hourly_window: Duration::from_secs(3600),
+        });
         assert!(limiter.check("a@b.com").is_ok(), "first send allowed");
-        let err = limiter.check("a@b.com").expect_err("second send within 60s must be rejected");
+        let err = limiter.check("a@b.com").expect_err("second send within interval must be rejected");
         assert!(err.contains("wait a minute"));
         // 其他邮箱不受影响
         assert!(limiter.check("other@b.com").is_ok());
     }
 
     #[test]
-    fn hourly_limit_of_five_is_enforced() {
-        let limiter = MailRateLimiter::new();
-        // 不同邮箱各发一次不影响；同邮箱伪造历史直接测 5 条上限
-        for _ in 0..HOURLY_LIMIT {
-            // 间隔超过 1 分钟才能过 MIN_INTERVAL —— 直接操作内部状态模拟
-        }
+    fn hourly_limit_is_enforced() {
+        let limiter = MailRateLimiter::with_config(MailRateLimitConfig {
+            min_interval: Duration::from_secs(1),
+            hourly_limit: 5,
+            hourly_window: Duration::from_secs(3600),
+        });
+        // 同邮箱伪造历史直接测上限
         let mut mailboxes = limiter.mailboxes.lock().unwrap();
         let hist = mailboxes.entry("x@y.com".to_string()).or_insert_with(MailboxHistory::new);
-        for i in 0..HOURLY_LIMIT {
+        for i in 0..5 {
             hist.recent.push_back(Instant::now() - Duration::from_secs(120 * (i as u64 + 1)));
         }
         drop(mailboxes);
-        let err = limiter.check("x@y.com").expect_err("6th send within an hour must be rejected");
+        let err = limiter.check("x@y.com").expect_err("6th send within window must be rejected");
         assert!(err.contains("hourly"));
+    }
+
+    #[test]
+    fn custom_config_changes_behavior() {
+        // 间隔 0 秒：连发多条都允许，直到小时上限
+        let limiter = MailRateLimiter::with_config(MailRateLimitConfig {
+            min_interval: Duration::from_secs(0),
+            hourly_limit: 2,
+            hourly_window: Duration::from_secs(3600),
+        });
+        assert!(limiter.check("c@d.com").is_ok());
+        assert!(limiter.check("c@d.com").is_ok());
+        assert!(limiter.check("c@d.com").is_err());
     }
 }

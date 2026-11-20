@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use infra_mail::ResendSender;
-use rovortex_users::{AdminService, DbBrowser, TokenSigner, UserService};
+use rovortex_users::{AdminService, DbBrowser, TokenSigner, UserService, UserServiceConfig};
 use sqlx::PgPool;
 use storage_pg::{PgAuditRepository, PgDbBrowser, PgEmailVerificationRepository, PgOauthIdentityRepository, PgRefreshTokenRepository, PgUserRepository};
 
@@ -25,6 +25,8 @@ struct Config {
     verify_url_base: String,
     /// 逗号分隔的管理员邮箱名单；启动时对已有账号提升 is_admin。
     admin_emails: Vec<String>,
+    /// 业务时序参数（refresh TTL / 验证链接 TTL / 注销冷静期 / 密码长度）。
+    users: UserServiceConfig,
 }
 
 impl Config {
@@ -53,6 +55,7 @@ impl Config {
             admin_emails: std::env::var("ROVORTEX_ADMIN_EMAILS")
                 .map(|s| s.split(',').map(str::to_string).collect())
                 .unwrap_or_default(),
+            users: crate::config::users_service_config(),
         }
     }
 }
@@ -72,6 +75,10 @@ pub struct AppState {
     pub oauth_github: Option<crate::routes::oauth::GithubOAuthConfig>,
     /// 管理端数据库浏览（只读旁路的业务层抽象，不再暴露裸连接池）。
     pub db_browser: Arc<dyn DbBrowser>,
+    /// 审计日志仓储（admin db 增删改的证据链写入点）。
+    pub audit: Arc<dyn rovortex_users::AuditRepository>,
+    /// 发信频率限制（magic link / 找回密码 / 注销恢复共用一个实例）。
+    pub mail_limiter: Arc<crate::mail_rate_limit::MailRateLimiter>,
 }
 
 impl AppState {
@@ -92,21 +99,22 @@ impl AppState {
             None => Arc::new(LogMailSender),
         };
 
-        let users_service = Arc::new(UserService::new(
+        let users_service = Arc::new(UserService::with_config(
             repo.clone(),
             refresh_repo.clone(),
             email_verif_repo,
             mail,
-            Arc::new(InMemoryLoginGuard::new()),
+            Arc::new(InMemoryLoginGuard::with_config(crate::config::login_guard_config())),
             audit_repo.clone(),
             identity_repo.clone(),
             config.verify_url_base,
+            config.users.clone(),
         ));
 
         let admin_service = Arc::new(AdminService::new(
             repo,
             refresh_repo,
-            audit_repo,
+            audit_repo.clone(),
             identity_repo,
         ));
 
@@ -129,7 +137,11 @@ impl AppState {
                     client_secret,
                 }
             }),
-            db_browser: Arc::new(PgDbBrowser::from_pool(pool)),
+            db_browser: Arc::new(PgDbBrowser::from_pool(pool.clone())),
+            audit: audit_repo.clone(),
+            mail_limiter: Arc::new(crate::mail_rate_limit::MailRateLimiter::with_config(
+                crate::config::mail_rate_limit_config(),
+            )),
         }
     }
 }

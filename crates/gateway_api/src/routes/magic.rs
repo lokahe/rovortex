@@ -7,18 +7,9 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 
 use crate::error::ApiError;
-use crate::mail_rate_limit::MailRateLimiter;
 use crate::routes::session::auth_response;
 use crate::routes::users::client_ip;
 use crate::state::AppState;
-
-/// 进程内发信频率限制（同邮箱 1 分钟 1 条 / 1 小时 5 条）。
-/// 单实例部署下与 AppState 同生命周期即可。
-static MAIL_LIMITER: std::sync::OnceLock<MailRateLimiter> = std::sync::OnceLock::new();
-
-fn mail_limiter() -> &'static MailRateLimiter {
-    MAIL_LIMITER.get_or_init(MailRateLimiter::new)
-}
 
 #[derive(Debug, Deserialize)]
 pub struct MagicLinkRequest {
@@ -36,7 +27,7 @@ pub async fn request_magic_link(
 ) -> Result<StatusCode, ApiError> {
     let ip = client_ip(&headers, addr);
     // 频率限制：超限 429，与登录限流语义一致
-    if let Err(reason) = mail_limiter().check(&req.email) {
+    if let Err(reason) = state.mail_limiter.check(&req.email) {
         return Err(ApiError::too_many_requests(reason));
     }
     state.users.request_magic_link(&req.email, &ip).await?;
