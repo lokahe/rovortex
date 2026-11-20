@@ -22,15 +22,13 @@ impl PgDbBrowser {
         Self { pool }
     }
 
-    /// 批量查列类型并做三重校验：表在白名单、列在白名单、列确实属于该表。
+    /// 批量查列类型并校验列确实属于该表（GENERATED 列已在网关层挡掉）。
     /// 返回顺序与 `columns` 一致（information_schema 的类型名可直接拼 CAST）。
     async fn column_types(
         &self,
         table: &str,
         columns: &[(String, Value)],
     ) -> Result<Vec<String>, DbBrowseError> {
-        rovortex_users::db_browse::resolve_table(table)?;
-        rovortex_users::db_browse::resolve_writable_columns(table, columns)?;
         let valid = self.describe(table).await?;
         columns
             .iter()

@@ -15,7 +15,7 @@ use crate::routes::auth::AdminUser;
 use crate::state::AppState;
 use rovortex_users::audit::{AuditAction, NewAuditLog};
 use rovortex_users::db_browse::{
-    BrowseParams, DbBrowseError, default_sort, mask_rows, resolve_sort_column, resolve_table,
+    BrowseParams, DbBrowseError, default_sort, resolve_sort_column, resolve_table,
     resolve_writable_columns,
 };
 
@@ -51,7 +51,7 @@ pub struct ColumnInfo {
 pub struct BrowseResponse {
     pub table: String,
     pub columns: Vec<ColumnInfo>,
-    /// 每行是完整列的 JSON 对象（敏感列已打码）。
+    /// 每行是完整列的 JSON 对象（原样，不打码）。
     pub rows: Vec<Value>,
     pub total: i64,
     pub page: u32,
@@ -118,7 +118,7 @@ pub async fn browse(
             .into_iter()
             .map(|c| ColumnInfo { name: c.name, data_type: c.data_type })
             .collect(),
-        rows: mask_rows(raw_rows),
+        rows: raw_rows,
         total,
         page,
         per_page,
