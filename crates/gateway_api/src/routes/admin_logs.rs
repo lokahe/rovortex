@@ -32,12 +32,12 @@ fn filter_of(q: &LogsQuery) -> LogFilter {
     }
 }
 
-/// GET /api/admin/logs —— 最近日志（默认 200 条，最大 1000）。
+/// GET /api/admin/logs —— 最近日志（默认 200 条，最大为 buffer 容量）。
 pub async fn list_logs(
     State(state): State<AppState>,
     Query(q): Query<LogsQuery>,
 ) -> Json<serde_json::Value> {
-    let limit = q.limit.unwrap_or(200).min(crate::log_buffer::LOG_BUFFER_CAPACITY);
+    let limit = q.limit.unwrap_or(200).min(state.log_buffer.capacity());
     let entries = state.log_buffer.snapshot(&filter_of(&q), limit);
     Json(serde_json::json!({ "logs": entries }))
 }

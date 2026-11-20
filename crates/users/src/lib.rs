@@ -41,4 +41,4 @@ pub use oauth_identity::{
 pub use rate_limit::{LoginGuard, guard_key};
 pub use refresh_token::{NewRefreshToken, RefreshTokenRepository, SessionView};
 pub use repository::UserRepository;
-pub use service::{ProfilePatch, SessionContext, UserService};
+pub use service::{ProfilePatch, SessionContext, UserService, UserServiceConfig};

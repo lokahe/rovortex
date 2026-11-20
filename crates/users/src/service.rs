@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::audit::{AuditAction, AuditRepository, NewAuditLog};
 use crate::domain::{
-    NewUser, User, UserError, validate_email, validate_password, validate_username,
+    NewUser, User, UserError, validate_email, validate_username,
 };
 use crate::email_verification::{
     EmailVerificationRepository, NewEmailVerification, VerificationPurpose,
@@ -20,14 +20,44 @@ use crate::rate_limit::LoginGuard;
 use crate::refresh_token::{NewRefreshToken, RefreshTokenRepository, SessionView};
 use crate::repository::UserRepository;
 
-const REFRESH_TTL_DAYS: i64 = 30;
-const EMAIL_VERIFICATION_TTL_MINS: i64 = 15;
+const DEFAULT_REFRESH_TTL_DAYS: i64 = 30;
+const DEFAULT_EMAIL_VERIFICATION_TTL_MINS: i64 = 15;
 /// users.status 的封禁值（与 admin::BANNED_STATUS 一致）。
 pub const BANNED_STATUS: i16 = 1;
 /// users.status 的注销值（软删，冷静期内可恢复）。
 pub const DELETED_STATUS: i16 = 2;
-/// 注销冷静期：到期由 cron 硬删（P7）。
-pub const DELETION_GRACE_DAYS: i64 = 30;
+/// 注销冷静期默认值：到期由 cron 硬删（P7）。
+pub const DEFAULT_DELETION_GRACE_DAYS: i64 = 30;
+/// 密码长度默认门槛。
+pub const DEFAULT_PASSWORD_MIN_LENGTH: usize = 8;
+pub const DEFAULT_PASSWORD_MAX_LENGTH: usize = 128;
+
+/// 业务时序/门槛参数：由组合根从环境变量读入（gateway_api/state.rs），
+/// 本 crate 只持有值；测试用 `with_config` 显式传值保持确定性。
+#[derive(Debug, Clone)]
+pub struct UserServiceConfig {
+    /// refresh token 有效期（天）。
+    pub refresh_ttl_days: i64,
+    /// 邮箱验证/重置链接有效期（分钟）。
+    pub email_verification_ttl_mins: i64,
+    /// 注销冷静期（天）。
+    pub deletion_grace_days: i64,
+    /// 密码长度上下限（字符数）。
+    pub password_min_length: usize,
+    pub password_max_length: usize,
+}
+
+impl Default for UserServiceConfig {
+    fn default() -> Self {
+        Self {
+            refresh_ttl_days: DEFAULT_REFRESH_TTL_DAYS,
+            email_verification_ttl_mins: DEFAULT_EMAIL_VERIFICATION_TTL_MINS,
+            deletion_grace_days: DEFAULT_DELETION_GRACE_DAYS,
+            password_min_length: DEFAULT_PASSWORD_MIN_LENGTH,
+            password_max_length: DEFAULT_PASSWORD_MAX_LENGTH,
+        }
+    }
+}
 
 /// 一次登录/刷新产出的完整会话：领域层不关心 JWT 细节，
 /// access token 由表现层用 TokenSigner 另行签发。
@@ -75,6 +105,8 @@ pub struct UserService {
     identities: Arc<dyn OauthIdentityRepository>,
     /// 验证邮件里的确认链接前缀（如 https://api.example.com）。
     verify_url_base: String,
+    /// 业务时序参数（TTL / 冷静期 / 密码长度）。
+    config: UserServiceConfig,
 }
 
 impl UserService {
@@ -89,6 +121,32 @@ impl UserService {
         identities: Arc<dyn OauthIdentityRepository>,
         verify_url_base: String,
     ) -> Self {
+        Self::with_config(
+            repo,
+            refresh,
+            email_verifications,
+            mail,
+            login_guard,
+            audit,
+            identities,
+            verify_url_base,
+            UserServiceConfig::default(),
+        )
+    }
+
+    /// 显式配置的构造入口（测试与组合根共用）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_config(
+        repo: Arc<dyn UserRepository>,
+        refresh: Arc<dyn RefreshTokenRepository>,
+        email_verifications: Arc<dyn EmailVerificationRepository>,
+        mail: Arc<dyn MailSender>,
+        login_guard: Arc<dyn LoginGuard>,
+        audit: Arc<dyn AuditRepository>,
+        identities: Arc<dyn OauthIdentityRepository>,
+        verify_url_base: String,
+        config: UserServiceConfig,
+    ) -> Self {
         Self {
             repo,
             refresh,
@@ -98,12 +156,26 @@ impl UserService {
             audit,
             identities,
             verify_url_base,
+            config,
         }
     }
 
     /// 暴露仓储给表现层做按 id 的资料读取（受鉴权保护，如 require_admin / users_me）。
     pub fn repository(&self) -> Arc<dyn UserRepository> {
         Arc::clone(&self.repo)
+    }
+
+    /// 密码长度校验（阈值来自 config，注册与改密码共用）。
+    fn validate_password_len(&self, password: &str) -> Result<(), UserError> {
+        let len = password.chars().count();
+        if (self.config.password_min_length..=self.config.password_max_length).contains(&len) {
+            Ok(())
+        } else {
+            Err(UserError::InvalidPassword(format!(
+                "length must be between {} and {}",
+                self.config.password_min_length, self.config.password_max_length
+            )))
+        }
     }
 
     /// 吊销用户全部会话（改密码等场景复用），返回吊销数量。
@@ -122,7 +194,7 @@ impl UserService {
     ) -> Result<Session, UserError> {
         validate_username(username)?;
         validate_email(email)?;
-        validate_password(password)?;
+        self.validate_password_len(password)?;
 
         // 预检查提升常见错误的可读性；真正的唯一性仍由仓储层保证（数据库唯一索引）。
         if self.repo.find_by_username(username).await?.is_some() {
@@ -281,7 +353,7 @@ impl UserService {
         new_password: &str,
         client_ip: &str,
     ) -> Result<(), UserError> {
-        validate_password(new_password)?;
+        self.validate_password_len(new_password)?;
         let user = self
             .repo
             .find_by_id(user_id)
@@ -502,7 +574,7 @@ impl UserService {
         new_password: &str,
         client_ip: &str,
     ) -> Result<(), UserError> {
-        validate_password(new_password)?;
+        self.validate_password_len(new_password)?;
         let user = self
             .repo
             .find_by_id(user_id)
@@ -531,7 +603,7 @@ impl UserService {
             return Err(UserError::AccountDeleted);
         }
         let raw = generate_refresh_token();
-        let expires_at = chrono::Utc::now() + chrono::Duration::days(REFRESH_TTL_DAYS);
+        let expires_at = chrono::Utc::now() + chrono::Duration::days(self.config.refresh_ttl_days);
         self.refresh
             .insert(NewRefreshToken {
                 id: Uuid::now_v7(),
@@ -575,7 +647,7 @@ impl UserService {
                     purpose: VerificationPurpose::Signup,
                     user_id: None,
                     expires_at: chrono::Utc::now()
-                        + chrono::Duration::minutes(EMAIL_VERIFICATION_TTL_MINS),
+                        + chrono::Duration::minutes(self.config.email_verification_ttl_mins),
                 })
                 .await?;
             let link = format!(
@@ -649,7 +721,7 @@ impl UserService {
                 purpose: VerificationPurpose::EmailChange,
                 user_id: Some(user_id),
                 expires_at: chrono::Utc::now()
-                    + chrono::Duration::minutes(EMAIL_VERIFICATION_TTL_MINS),
+                    + chrono::Duration::minutes(self.config.email_verification_ttl_mins),
             })
             .await?;
         let link = format!(
@@ -706,7 +778,7 @@ impl UserService {
                 purpose: VerificationPurpose::MagicLink,
                 user_id: None,
                 expires_at: chrono::Utc::now()
-                    + chrono::Duration::minutes(EMAIL_VERIFICATION_TTL_MINS),
+                    + chrono::Duration::minutes(self.config.email_verification_ttl_mins),
             })
             .await?;
         let link = format!(
@@ -769,7 +841,7 @@ impl UserService {
                 purpose: VerificationPurpose::PasswordReset,
                 user_id: Some(user.id),
                 expires_at: chrono::Utc::now()
-                    + chrono::Duration::minutes(EMAIL_VERIFICATION_TTL_MINS),
+                    + chrono::Duration::minutes(self.config.email_verification_ttl_mins),
             })
             .await?;
         let link = format!(
@@ -791,7 +863,7 @@ impl UserService {
         new_password: &str,
         client_ip: &str,
     ) -> Result<(), UserError> {
-        validate_password(new_password)?;
+        self.validate_password_len(new_password)?;
         let token_hash = hash_refresh_token(raw_token);
         let (_, purpose, user_id) = self
             .email_verifications
@@ -922,14 +994,14 @@ impl UserService {
                 purpose: VerificationPurpose::AccountDeletion,
                 user_id: Some(user_id),
                 expires_at: chrono::Utc::now()
-                    + chrono::Duration::minutes(EMAIL_VERIFICATION_TTL_MINS),
+                    + chrono::Duration::minutes(self.config.email_verification_ttl_mins),
             })
             .await?;
         let link = format!(
             "{}/api/auth/account/confirm-deletion?token={}",
             self.verify_url_base, raw
         );
-        let html = account_deletion_email_html(&user.username, &link, DELETION_GRACE_DAYS);
+        let html = account_deletion_email_html(&user.username, &link, self.config.deletion_grace_days);
         if let Err(e) = self
             .mail
             .send(&user.email, "Rovortex 账号注销确认", &html)
@@ -982,7 +1054,7 @@ impl UserService {
             return Ok(());
         }
         if let Some(deleted_at) = user.deleted_at {
-            if chrono::Utc::now() - deleted_at > chrono::Duration::days(DELETION_GRACE_DAYS) {
+            if chrono::Utc::now() - deleted_at > chrono::Duration::days(self.config.deletion_grace_days) {
                 return Ok(());
             }
         }
@@ -1002,14 +1074,14 @@ impl UserService {
                 purpose: VerificationPurpose::AccountRecovery,
                 user_id: Some(user_id),
                 expires_at: chrono::Utc::now()
-                    + chrono::Duration::minutes(EMAIL_VERIFICATION_TTL_MINS),
+                    + chrono::Duration::minutes(self.config.email_verification_ttl_mins),
             })
             .await?;
         let link = format!(
             "{}/api/auth/account/confirm-recovery?token={}",
             self.verify_url_base, raw
         );
-        let html = account_recovery_email_html(&user.username, &link, user.deleted_at, DELETION_GRACE_DAYS);
+        let html = account_recovery_email_html(&user.username, &link, user.deleted_at, self.config.deletion_grace_days);
         if let Err(e) = self.mail.send(email, "Rovortex 账号恢复", &html).await {
             tracing::warn!(email, error = %e, "failed to send account recovery mail");
         }
@@ -1017,7 +1089,7 @@ impl UserService {
     }
 
     /// 确认恢复：消费 token → status 回 0、email 换回、清 deleted_at。
-    /// 冷静期外（deleted_at 超过 DELETION_GRACE_DAYS）拒绝——数据可能已被 cron 清理。
+    /// 冷静期外（deleted_at 超过 config.deletion_grace_days）拒绝——数据可能已被 cron 清理。
     pub async fn confirm_account_recovery(
         &self,
         raw_token: &str,
@@ -1044,7 +1116,7 @@ impl UserService {
             return Err(UserError::InvalidRefreshToken);
         }
         if let Some(deleted_at) = user.deleted_at {
-            if chrono::Utc::now() - deleted_at > chrono::Duration::days(DELETION_GRACE_DAYS) {
+            if chrono::Utc::now() - deleted_at > chrono::Duration::days(self.config.deletion_grace_days) {
                 return Err(UserError::InvalidRefreshToken);
             }
         }

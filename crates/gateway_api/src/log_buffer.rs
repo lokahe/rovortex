@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-pub const LOG_BUFFER_CAPACITY: usize = 1000;
+/// 默认容量，可被 ROVORTEX_LOG_BUFFER_CAPACITY 覆盖（main.rs 读取）。
+pub const DEFAULT_LOG_BUFFER_CAPACITY: usize = 1000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
@@ -68,6 +69,7 @@ struct Inner {
 #[derive(Clone, Debug)]
 pub struct LogBuffer {
     inner: Arc<Inner>,
+    capacity: usize,
 }
 
 /// 日志筛选条件（历史查询与 SSE 订阅共用）。
@@ -108,20 +110,27 @@ impl LogFilter {
 
 impl LogBuffer {
     pub fn new(capacity: usize) -> Self {
-        let (tx, _) = broadcast::channel(capacity.max(16));
+        let capacity = capacity.max(16);
+        let (tx, _) = broadcast::channel(capacity);
         Self {
             inner: Arc::new(Inner {
                 entries: Mutex::new(VecDeque::with_capacity(capacity)),
                 tx,
             }),
+            capacity,
         }
+    }
+
+    /// 构造时传入的容量（admin 查询上限与写路径淘汰判断都以此为准）。
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// 写入一条日志：入 ring buffer + 广播给订阅者。永不阻塞、永不失败。
     pub fn push(&self, entry: LogEntry) {
         let entry = Arc::new(entry);
         let mut entries = self.inner.entries.lock().unwrap_or_else(|e| e.into_inner());
-        if entries.len() >= LOG_BUFFER_CAPACITY {
+        if entries.len() >= self.capacity {
             entries.pop_front();
         }
         entries.push_back(entry.clone());

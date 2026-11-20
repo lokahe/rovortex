@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use infra_mail::ResendSender;
-use rovortex_users::{AdminService, DbBrowser, TokenSigner, UserService};
+use rovortex_users::{AdminService, DbBrowser, TokenSigner, UserService, UserServiceConfig};
 use sqlx::PgPool;
 use storage_pg::{PgAuditRepository, PgDbBrowser, PgEmailVerificationRepository, PgOauthIdentityRepository, PgRefreshTokenRepository, PgUserRepository};
 
@@ -25,6 +25,8 @@ struct Config {
     verify_url_base: String,
     /// 逗号分隔的管理员邮箱名单；启动时对已有账号提升 is_admin。
     admin_emails: Vec<String>,
+    /// 业务时序参数（refresh TTL / 验证链接 TTL / 注销冷静期 / 密码长度）。
+    users: UserServiceConfig,
 }
 
 impl Config {
@@ -53,8 +55,40 @@ impl Config {
             admin_emails: std::env::var("ROVORTEX_ADMIN_EMAILS")
                 .map(|s| s.split(',').map(str::to_string).collect())
                 .unwrap_or_default(),
+            users: users_config_from_env(),
         }
     }
+}
+
+/// 业务时序参数的环境变量读取：非法/缺省一律回退默认（重启生效）。
+fn users_config_from_env() -> UserServiceConfig {
+    // 环境变量解析辅助：None = 未配置或非法，回退默认。
+    fn env_i64(key: &str) -> Option<i64> {
+        std::env::var(key).ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0)
+    }
+    let mut cfg = UserServiceConfig::default();
+    if let Some(v) = env_i64("ROVORTEX_REFRESH_TTL_DAYS") {
+        cfg.refresh_ttl_days = v;
+    }
+    if let Some(v) = env_i64("ROVORTEX_EMAIL_VERIFICATION_TTL_MINS") {
+        cfg.email_verification_ttl_mins = v;
+    }
+    if let Some(v) = env_i64("ROVORTEX_DELETION_GRACE_DAYS") {
+        cfg.deletion_grace_days = v;
+    }
+    let min = env_i64("ROVORTEX_PASSWORD_MIN_LENGTH").map(|v| v as usize);
+    let max = env_i64("ROVORTEX_PASSWORD_MAX_LENGTH").map(|v| v as usize);
+    if let Some(min) = min {
+        cfg.password_min_length = min;
+    }
+    if let Some(max) = max {
+        cfg.password_max_length = max;
+    }
+    if min.is_some() && max.is_some() && cfg.password_min_length > cfg.password_max_length {
+        // 上下限配置颠倒时快速失败，避免带病启动。
+        panic!("ROVORTEX_PASSWORD_MIN_LENGTH must be <= ROVORTEX_PASSWORD_MAX_LENGTH");
+    }
+    cfg
 }
 
 /// 通过 `State<AppState>` 提取器在各 handler 间共享。
@@ -92,7 +126,7 @@ impl AppState {
             None => Arc::new(LogMailSender),
         };
 
-        let users_service = Arc::new(UserService::new(
+        let users_service = Arc::new(UserService::with_config(
             repo.clone(),
             refresh_repo.clone(),
             email_verif_repo,
@@ -101,6 +135,7 @@ impl AppState {
             audit_repo.clone(),
             identity_repo.clone(),
             config.verify_url_base,
+            config.users.clone(),
         ));
 
         let admin_service = Arc::new(AdminService::new(

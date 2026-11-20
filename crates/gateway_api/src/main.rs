@@ -26,7 +26,13 @@ async fn main() {
     // 可观测性：RUST_LOG 优先，默认 info 级别。
     // registry 组合：stdout fmt 层照常输出 + BufferLayer 同步进进程内 ring buffer
     // （admin 日志页数据源；buffer 要先于 subscriber 存在，故先构造再装）。
-    let log_buffer = crate::log_buffer::LogBuffer::new(crate::log_buffer::LOG_BUFFER_CAPACITY);
+    // 容量可配：ROVORTEX_LOG_BUFFER_CAPACITY，默认 1000，非法/0 值回退默认。
+    let log_capacity: usize = std::env::var("ROVORTEX_LOG_BUFFER_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(crate::log_buffer::DEFAULT_LOG_BUFFER_CAPACITY);
+    let log_buffer = crate::log_buffer::LogBuffer::new(log_capacity);
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer().with_filter(
