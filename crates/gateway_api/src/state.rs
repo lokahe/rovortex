@@ -79,6 +79,8 @@ pub struct AppState {
     pub audit: Arc<dyn rovortex_users::AuditRepository>,
     /// 发信频率限制（magic link / 找回密码 / 注销恢复共用一个实例）。
     pub mail_limiter: Arc<crate::mail_rate_limit::MailRateLimiter>,
+    /// 注册验证码确认尝试限流（6 位码爆破防线）。
+    pub confirm_code_limiter: Arc<crate::routes::signup::ConfirmCodeLimiter>,
 }
 
 impl AppState {
@@ -142,6 +144,7 @@ impl AppState {
             mail_limiter: Arc::new(crate::mail_rate_limit::MailRateLimiter::with_config(
                 crate::config::mail_rate_limit_config(),
             )),
+            confirm_code_limiter: Arc::new(crate::routes::signup::ConfirmCodeLimiter::new()),
         }
     }
 }

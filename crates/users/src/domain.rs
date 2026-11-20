@@ -51,6 +51,9 @@ pub enum UserError {
     #[error("email `{0}` is already registered")]
     EmailTaken(String),
 
+    #[error("invalid or expired signup code")]
+    InvalidSignupCode,
+
     #[error("invalid username: {0}")]
     InvalidUsername(String),
 

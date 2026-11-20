@@ -64,6 +64,9 @@ impl IntoResponse for ApiError {
                     UserError::InvalidCredentials | UserError::InvalidRefreshToken => {
                         (StatusCode::UNAUTHORIZED, "invalid_credentials")
                     }
+                    UserError::InvalidSignupCode => {
+                        (StatusCode::UNAUTHORIZED, "invalid_signup_code")
+                    }
                     UserError::TooManyAttempts => {
                         (StatusCode::TOO_MANY_REQUESTS, "too_many_attempts")
                     }

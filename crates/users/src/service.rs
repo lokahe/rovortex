@@ -624,6 +624,160 @@ impl UserService {
         })
     }
 
+    /// 发起邮箱注册验证：不建号，发双通道验证邮件（6 位验证码 + 确认链接）。
+    ///
+    /// 账号在验证成功（confirm_code / confirm_link）时才创建——错邮箱零残留，
+    /// 未验证账号从未有过会话。两条通道各持一条一次性记录，任一成功即可。
+    /// 防枚举：邮箱已注册则不发信但恒 Ok。发信失败不阻断（可重发），只记录。
+    pub async fn request_signup(&self, email: &str, client_ip: &str) -> Result<(), UserError> {
+        validate_email(email)?;
+        if self.repo.find_by_email(email).await?.is_some() {
+            return Ok(()); // 已注册：防枚举，不发信
+        }
+        self.audit(None, AuditAction::SignupRequested, format!("email={email}"), client_ip).await;
+
+        let expires_at = chrono::Utc::now()
+            + chrono::Duration::minutes(self.config.email_verification_ttl_mins);
+        // 通道一：6 位数字验证码（App 内手动回填）
+        let code = Self::generate_signup_code();
+        // 通道二：确认链接（PC 浏览器完成注册）
+        let link_token = generate_refresh_token();
+        for raw in [&code, &link_token] {
+            self.email_verifications
+                .insert(NewEmailVerification {
+                    id: Uuid::now_v7(),
+                    email: email.to_string(),
+                    token_hash: hash_refresh_token(raw),
+                    purpose: VerificationPurpose::Signup,
+                    user_id: None,
+                    expires_at,
+                })
+                .await?;
+        }
+        let link = format!(
+            "{}/api/auth/signup/confirm?token={}",
+            self.verify_url_base, link_token
+        );
+        let html = Self::signup_email_html(email, &code, &link);
+        if let Err(e) = self.mail.send(email, "Rovortex 注册验证", &html).await {
+            tracing::warn!(email, error = %e, "failed to send signup email");
+        }
+        Ok(())
+    }
+
+    /// 验证码通道确认注册：码 + 密码（App 暂存回传）→ 建号 + 会话。
+    ///
+    /// 建号即视为邮箱已验证（收码权即邮箱归属证明）。限流由表现层实施。
+    pub async fn confirm_signup_code(
+        &self,
+        email: &str,
+        code: &str,
+        password: &str,
+        username: Option<&str>,
+        client_ip: &str,
+        ctx: &SessionContext,
+    ) -> Result<Session, UserError> {
+        let (verified_email, _purpose, _) = self
+            .email_verifications
+            .consume_by_hash(&hash_refresh_token(code))
+            .await?
+            .ok_or(UserError::InvalidSignupCode)?;
+        if _purpose != VerificationPurpose::Signup || !verified_email.eq_ignore_ascii_case(email) {
+            return Err(UserError::InvalidSignupCode);
+        }
+        self.create_verified_user(&verified_email, password, username, client_ip, ctx)
+            .await
+    }
+
+    /// 链接通道确认注册：PC 浏览器表单提交（token + 密码）→ 建号。
+    pub async fn confirm_signup_link(
+        &self,
+        raw_token: &str,
+        password: &str,
+        client_ip: &str,
+        ctx: &SessionContext,
+    ) -> Result<Session, UserError> {
+        let (email, purpose, _) = self
+            .email_verifications
+            .consume_by_hash(&hash_refresh_token(raw_token))
+            .await?
+            .ok_or(UserError::InvalidSignupCode)?;
+        if purpose != VerificationPurpose::Signup {
+            return Err(UserError::InvalidSignupCode);
+        }
+        self.create_verified_user(&email, password, None, client_ip, ctx)
+            .await
+    }
+
+    /// 建号（邮箱已验证语义）：密码/用户名校验 + 唯一性检查 + email_verified=true。
+    /// 并发撞车由仓储层唯一索引兜底。
+    async fn create_verified_user(
+        &self,
+        email: &str,
+        password: &str,
+        username: Option<&str>,
+        client_ip: &str,
+        ctx: &SessionContext,
+    ) -> Result<Session, UserError> {
+        self.validate_password_len(password)?;
+        if let Some(name) = username {
+            validate_username(name)?;
+            if self.repo.find_by_username(name).await?.is_some() {
+                return Err(UserError::UsernameTaken(name.into()));
+            }
+        }
+        if self.repo.find_by_email(email).await?.is_some() {
+            return Err(UserError::EmailTaken(email.into()));
+        }
+        let password_hash = hash_password(password)?;
+        let username = match username {
+            Some(name) => name.to_string(),
+            None => self.unique_username_from(email, None).await?,
+        };
+        let mut user = self
+            .repo
+            .create(NewUser {
+                username,
+                email: email.into(),
+                password_hash: Some(password_hash),
+            })
+            .await?;
+        self.repo.mark_email_verified(user.id).await?;
+        user.email_verified = true;
+        self.audit(
+            Some(user.id),
+            AuditAction::Register,
+            format!("username={} verified=true", user.username),
+            client_ip,
+        ).await;
+        self.issue_session(user, ctx).await
+    }
+
+    /// 生成 6 位数字注册验证码（字符串形式；哈希后落 email_verifications）。
+    fn generate_signup_code() -> String {
+        use rand_core::{OsRng, RngCore};
+        // 6 位数字空间 10^6；confirm 端点限流（表现层）使爆破不可行。
+        format!("{:06}", OsRng.next_u32() % 1_000_000)
+    }
+
+    /// 注册验证邮件 HTML 模板：验证码 + 确认链接双通道。
+    fn signup_email_html(email: &str, code: &str, link: &str) -> String {
+        format!(
+            r#"<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+  <h2>注册 Rovortex</h2>
+  <p>你好 {email}，你的注册验证码（15 分钟内有效）：</p>
+  <p style="font-size:32px;letter-spacing:8px;font-weight:bold;color:#4f46e5;margin:16px 0">{code}</p>
+  <p style="color:#555">在应用中输入此验证码即可完成注册。</p>
+  <p style="color:#555">也可以在电脑上点击下面的链接完成注册：</p>
+  <p><a href="{link}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px">在浏览器中完成注册</a></p>
+  <p style="color:#888;font-size:13px">如果你没有注册过 Rovortex，请忽略本邮件。</p>
+</div>"#,
+            email = email,
+            code = code,
+            link = link
+        )
+    }
+
     /// 请求注册邮箱验证：给指定邮箱发确认信。
     ///
     /// 防枚举：无论邮箱是否已注册，都返回 Ok（不泄露注册状态）。
@@ -2784,6 +2938,109 @@ mod tests {
         assert!(matches!(
             svc.confirm_account_recovery(&rec_raw, "127.0.0.1").await,
             Err(UserError::InvalidRefreshToken)
+        ));
+    }
+
+    /// 从注册邮件 HTML 中提取 6 位验证码。
+    fn extract_code_from_html(html: &str) -> String {
+        let marker = "margin:16px 0\">";
+        let start = html.find(marker).expect("code in signup email html") + marker.len();
+        html[start..start + 6].to_string()
+    }
+
+    #[tokio::test]
+    async fn signup_code_flow_creates_verified_user() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+
+        // 已注册邮箱：防枚举，不发信
+        svc.register(Some("tina"), "tina@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default()).await.unwrap();
+        svc.request_signup("tina@example.com", "9.9.9.9").await.unwrap();
+        assert!(sent.sent.lock().unwrap().is_empty());
+
+        // 未注册邮箱：发信（码 + 链接双通道）
+        svc.request_signup("vada@example.com", "9.9.9.9").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        assert_eq!(mails.len(), 1, "signup mail sent");
+        assert_eq!(mails[0].0, "vada@example.com");
+        let code = extract_code_from_html(&mails[0].2);
+        let link_raw = extract_token_from_html(&mails[0].2);
+        drop(mails);
+
+        // 建号前：邮箱不存在
+        assert!(svc.repository().find_by_email("vada@example.com").await.unwrap().is_none());
+
+        // 错码：拒绝且不建号
+        assert!(matches!(
+            svc.confirm_signup_code("vada@example.com", "000000", "Str0ng-pass!", None, "9.9.9.9", &SessionContext::default()).await,
+            Err(UserError::InvalidSignupCode)
+        ));
+
+        // 正确码 + 建号 + 直接是 verified
+        let s = svc
+            .confirm_signup_code("vada@example.com", &code, "Str0ng-pass!", None, "9.9.9.9", &SessionContext::default())
+            .await
+            .unwrap();
+        assert!(s.user.email_verified, "signup confirm = verified");
+        assert_eq!(s.user.username, "vada", "auto from email prefix");
+        assert!(!s.refresh_token.is_empty());
+
+        // 码一次性：复用失败
+        assert!(matches!(
+            svc.confirm_signup_code("vada@example.com", &code, "Str0ng-pass!", None, "9.9.9.9", &SessionContext::default()).await,
+            Err(UserError::InvalidSignupCode)
+        ));
+
+        // 密码登录可用
+        let by_password = svc
+            .login("k:v", "vada@example.com", "Str0ng-pass!", "127.0.0.1", &SessionContext::default())
+            .await
+            .unwrap();
+        assert_eq!(by_password.user.id, s.user.id);
+
+        // 链接通道仍可用？不——链接 token 是另一条记录，但账号已存在；
+        // 链接确认会撞 EmailTaken。防御：链接确认对已存在邮箱报错。
+        assert!(matches!(
+            svc.confirm_signup_link(&link_raw, "An0ther-pass!", "9.9.9.9", &SessionContext::default()).await,
+            Err(UserError::EmailTaken(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn signup_link_flow_creates_verified_user() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+        svc.request_signup("wendy@example.com", "9.9.9.9").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let link_raw = extract_token_from_html(&mails[0].2);
+        drop(mails);
+
+        let s = svc
+            .confirm_signup_link(&link_raw, "Str0ng-pass!", "9.9.9.9", &SessionContext::default())
+            .await
+            .unwrap();
+        assert!(s.user.email_verified);
+        assert_eq!(s.user.username, "wendy");
+
+        // 交叉用途：signup link token 不能当 password_reset 用
+        assert!(matches!(
+            svc.confirm_password_reset(&link_raw, "N3w-pass-word!", "6.6.6.6").await,
+            Err(UserError::InvalidRefreshToken)
+        ));
+
+        // 登录可用
+        assert!(svc.login("k:w", "wendy@example.com", "Str0ng-pass!", "1.1.1.1", &SessionContext::default()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn signup_code_rejected_for_other_email() {
+        let (svc, sent) = service_with_mail(TestMailSender::default());
+        svc.request_signup("xena@example.com", "9.9.9.9").await.unwrap();
+        let mails = sent.sent.lock().unwrap();
+        let code = extract_code_from_html(&mails[0].2);
+        drop(mails);
+        // 码发给 xena，却声明是别邮箱 → 拒绝
+        assert!(matches!(
+            svc.confirm_signup_code("yuri@example.com", &code, "Str0ng-pass!", None, "9.9.9.9", &SessionContext::default()).await,
+            Err(UserError::InvalidSignupCode)
         ));
     }
 }
