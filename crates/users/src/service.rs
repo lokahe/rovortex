@@ -20,27 +20,20 @@ use crate::rate_limit::LoginGuard;
 use crate::refresh_token::{NewRefreshToken, RefreshTokenRepository, SessionView};
 use crate::repository::UserRepository;
 
-const DEFAULT_REFRESH_TTL_DAYS: i64 = 30;
-const DEFAULT_EMAIL_VERIFICATION_TTL_MINS: i64 = 15;
 /// users.status 的封禁值（与 admin::BANNED_STATUS 一致）。
 pub const BANNED_STATUS: i16 = 1;
 /// users.status 的注销值（软删，冷静期内可恢复）。
 pub const DELETED_STATUS: i16 = 2;
-/// 注销冷静期默认值：到期由 cron 硬删（P7）。
-pub const DEFAULT_DELETION_GRACE_DAYS: i64 = 30;
-/// 密码长度默认门槛。
-pub const DEFAULT_PASSWORD_MIN_LENGTH: usize = 8;
-pub const DEFAULT_PASSWORD_MAX_LENGTH: usize = 128;
 
-/// 业务时序/门槛参数：由组合根从环境变量读入（gateway_api/state.rs），
-/// 本 crate 只持有值；测试用 `with_config` 显式传值保持确定性。
+/// 业务时序/门槛参数：由组合根从环境变量读入（gateway_api/config.rs），
+/// 本 crate 只持有值 + 默认值；测试用 `with_config` 显式传值保持确定性。
 #[derive(Debug, Clone)]
 pub struct UserServiceConfig {
     /// refresh token 有效期（天）。
     pub refresh_ttl_days: i64,
     /// 邮箱验证/重置链接有效期（分钟）。
     pub email_verification_ttl_mins: i64,
-    /// 注销冷静期（天）。
+    /// 注销冷静期（天）。到期由 cron 硬删（P7）。
     pub deletion_grace_days: i64,
     /// 密码长度上下限（字符数）。
     pub password_min_length: usize,
@@ -50,11 +43,11 @@ pub struct UserServiceConfig {
 impl Default for UserServiceConfig {
     fn default() -> Self {
         Self {
-            refresh_ttl_days: DEFAULT_REFRESH_TTL_DAYS,
-            email_verification_ttl_mins: DEFAULT_EMAIL_VERIFICATION_TTL_MINS,
-            deletion_grace_days: DEFAULT_DELETION_GRACE_DAYS,
-            password_min_length: DEFAULT_PASSWORD_MIN_LENGTH,
-            password_max_length: DEFAULT_PASSWORD_MAX_LENGTH,
+            refresh_ttl_days: 30,
+            email_verification_ttl_mins: 15,
+            deletion_grace_days: 30,
+            password_min_length: 8,
+            password_max_length: 128,
         }
     }
 }

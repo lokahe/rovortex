@@ -55,40 +55,9 @@ impl Config {
             admin_emails: std::env::var("ROVORTEX_ADMIN_EMAILS")
                 .map(|s| s.split(',').map(str::to_string).collect())
                 .unwrap_or_default(),
-            users: users_config_from_env(),
+            users: crate::config::users_service_config(),
         }
     }
-}
-
-/// 业务时序参数的环境变量读取：非法/缺省一律回退默认（重启生效）。
-fn users_config_from_env() -> UserServiceConfig {
-    // 环境变量解析辅助：None = 未配置或非法，回退默认。
-    fn env_i64(key: &str) -> Option<i64> {
-        std::env::var(key).ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0)
-    }
-    let mut cfg = UserServiceConfig::default();
-    if let Some(v) = env_i64("ROVORTEX_REFRESH_TTL_DAYS") {
-        cfg.refresh_ttl_days = v;
-    }
-    if let Some(v) = env_i64("ROVORTEX_EMAIL_VERIFICATION_TTL_MINS") {
-        cfg.email_verification_ttl_mins = v;
-    }
-    if let Some(v) = env_i64("ROVORTEX_DELETION_GRACE_DAYS") {
-        cfg.deletion_grace_days = v;
-    }
-    let min = env_i64("ROVORTEX_PASSWORD_MIN_LENGTH").map(|v| v as usize);
-    let max = env_i64("ROVORTEX_PASSWORD_MAX_LENGTH").map(|v| v as usize);
-    if let Some(min) = min {
-        cfg.password_min_length = min;
-    }
-    if let Some(max) = max {
-        cfg.password_max_length = max;
-    }
-    if min.is_some() && max.is_some() && cfg.password_min_length > cfg.password_max_length {
-        // 上下限配置颠倒时快速失败，避免带病启动。
-        panic!("ROVORTEX_PASSWORD_MIN_LENGTH must be <= ROVORTEX_PASSWORD_MAX_LENGTH");
-    }
-    cfg
 }
 
 /// 通过 `State<AppState>` 提取器在各 handler 间共享。
@@ -106,6 +75,8 @@ pub struct AppState {
     pub oauth_github: Option<crate::routes::oauth::GithubOAuthConfig>,
     /// 管理端数据库浏览（只读旁路的业务层抽象，不再暴露裸连接池）。
     pub db_browser: Arc<dyn DbBrowser>,
+    /// 发信频率限制（magic link / 找回密码 / 注销恢复共用一个实例）。
+    pub mail_limiter: Arc<crate::mail_rate_limit::MailRateLimiter>,
 }
 
 impl AppState {
@@ -131,7 +102,7 @@ impl AppState {
             refresh_repo.clone(),
             email_verif_repo,
             mail,
-            Arc::new(InMemoryLoginGuard::new()),
+            Arc::new(InMemoryLoginGuard::with_config(crate::config::login_guard_config())),
             audit_repo.clone(),
             identity_repo.clone(),
             config.verify_url_base,
@@ -165,6 +136,9 @@ impl AppState {
                 }
             }),
             db_browser: Arc::new(PgDbBrowser::from_pool(pool)),
+            mail_limiter: Arc::new(crate::mail_rate_limit::MailRateLimiter::with_config(
+                crate::config::mail_rate_limit_config(),
+            )),
         }
     }
 }

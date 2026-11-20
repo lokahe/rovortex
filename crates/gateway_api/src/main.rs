@@ -3,6 +3,7 @@
 //! 职责边界：本 crate 只做协议适配（HTTP ⇄ 业务调用），
 //! 所有业务规则位于 `rovortex-users` 等业务模块。
 
+mod config;
 mod error;
 mod log_buffer;
 mod log_layer;
@@ -26,13 +27,7 @@ async fn main() {
     // 可观测性：RUST_LOG 优先，默认 info 级别。
     // registry 组合：stdout fmt 层照常输出 + BufferLayer 同步进进程内 ring buffer
     // （admin 日志页数据源；buffer 要先于 subscriber 存在，故先构造再装）。
-    // 容量可配：ROVORTEX_LOG_BUFFER_CAPACITY，默认 1000，非法/0 值回退默认。
-    let log_capacity: usize = std::env::var("ROVORTEX_LOG_BUFFER_CAPACITY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(crate::log_buffer::DEFAULT_LOG_BUFFER_CAPACITY);
-    let log_buffer = crate::log_buffer::LogBuffer::new(log_capacity);
+    let log_buffer = crate::log_buffer::LogBuffer::new(crate::config::log_buffer_capacity());
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer().with_filter(

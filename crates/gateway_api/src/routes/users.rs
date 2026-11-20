@@ -81,7 +81,7 @@ pub async fn register(
 
 /// POST /api/users/login —— 200 OK
 ///
-/// 限流键 (client_ip, login)：连续失败 5 次锁 15 分钟。
+/// 限流键 (client_ip, login)：连续失败达到阈值（默认 9）锁 15 分钟，均可配。
 /// 客户端 IP 取 X-Forwarded-For 首段（Caddy 反代注入），回退 ConnectInfo。
 pub async fn login(
     State(state): State<AppState>,

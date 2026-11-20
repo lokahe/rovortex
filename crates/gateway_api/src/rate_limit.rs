@@ -1,7 +1,7 @@
 //! 登录限流的进程内实现。
 //!
 //! 1C1G 单实例部署够用；结构上 trait 在业务层，将来换 Redis 只改组合根。
-//! 阈值/窗口由环境变量注入（启动时读取），未配置时用默认值。
+//! 阈值/窗口由组合根注入（`config::login_guard_config`），本模块不读环境变量。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -9,32 +9,10 @@ use std::time::{Duration, Instant};
 
 use rovortex_users::{LoginGuard, UserError};
 
-const DEFAULT_MAX_FAILURES: u32 = 9;
-const DEFAULT_LOCK_WINDOW: Duration = Duration::from_secs(15 * 60);
-
-/// 环境变量名 → 解析后的限流参数。
+/// 登录限流参数（值对象；环境读取在 config.rs）。
 pub struct LoginGuardConfig {
     pub max_failures: u32,
     pub lock_window: Duration,
-}
-
-impl LoginGuardConfig {
-    /// 从环境读取 `ROVORTEX_LOGIN_MAX_FAILURES` / `ROVORTEX_LOGIN_LOCK_WINDOW_SECS`。
-    /// 解析失败（非数字/0）静默回退默认值，避免误配导致限流失效。
-    pub fn from_env() -> Self {
-        let max_failures = std::env::var("ROVORTEX_LOGIN_MAX_FAILURES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&n: &u32| n > 0)
-            .unwrap_or(DEFAULT_MAX_FAILURES);
-        let lock_window = std::env::var("ROVORTEX_LOGIN_LOCK_WINDOW_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(Duration::from_secs)
-            .filter(|d| !d.is_zero())
-            .unwrap_or(DEFAULT_LOCK_WINDOW);
-        Self { max_failures, lock_window }
-    }
 }
 
 pub struct InMemoryLoginGuard {
@@ -44,10 +22,6 @@ pub struct InMemoryLoginGuard {
 }
 
 impl InMemoryLoginGuard {
-    pub fn new() -> Self {
-        Self::with_config(LoginGuardConfig::from_env())
-    }
-
     pub fn with_config(config: LoginGuardConfig) -> Self {
         Self {
             max_failures: config.max_failures,
@@ -78,7 +52,7 @@ impl InMemoryLoginGuard {
 
 impl Default for InMemoryLoginGuard {
     fn default() -> Self {
-        Self::new()
+        Self::with_config(crate::config::login_guard_config())
     }
 }
 
@@ -91,13 +65,15 @@ struct Entry {
 #[async_trait::async_trait]
 impl LoginGuard for InMemoryLoginGuard {
     async fn check(&self, key: &str) -> Result<(), UserError> {
-        let entries = self.entries.lock().unwrap();
-        if let Some(e) = entries.get(key) {
-            if let Some(until) = self.locked_until(e) {
-                if until > Instant::now() {
-                    return Err(UserError::TooManyAttempts);
-                }
+        let mut entries = self.entries.lock().unwrap();
+        let locked = entries.get(key).and_then(|e| self.locked_until(e));
+        if let Some(until) = locked {
+            if until > Instant::now() {
+                return Err(UserError::TooManyAttempts);
             }
+            // 锁定窗口已过：这轮惩罚结束。计数视为清零重新起算，
+            // 而不是"窗口外再失败 1 次立即再锁"。
+            entries.remove(key);
         }
         Ok(())
     }
@@ -164,15 +140,19 @@ mod tests {
 
     #[tokio::test]
     async fn positive_window_locks_then_unlocks() {
-        let g = guard(1, 0);
-        // 手动注入一个未来才过期的失败记录：窗口 100ms。
         let g = InMemoryLoginGuard::with_config(LoginGuardConfig {
-            max_failures: 1,
+            max_failures: 2,
             lock_window: Duration::from_millis(100),
         });
+        g.record_failure("k").await;
         g.record_failure("k").await;
         assert!(matches!(g.check("k").await, Err(UserError::TooManyAttempts)));
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(g.check("k").await.is_ok());
+        // 窗口过期后计数清零：1 次失败（< 2）不再立即锁，第 2 次才锁。
+        g.record_failure("k").await;
+        assert!(g.check("k").await.is_ok());
+        g.record_failure("k").await;
+        assert!(matches!(g.check("k").await, Err(UserError::TooManyAttempts)));
     }
 }

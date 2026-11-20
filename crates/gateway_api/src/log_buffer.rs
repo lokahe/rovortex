@@ -11,9 +11,6 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-/// 默认容量，可被 ROVORTEX_LOG_BUFFER_CAPACITY 覆盖（main.rs 读取）。
-pub const DEFAULT_LOG_BUFFER_CAPACITY: usize = 1000;
-
 #[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
     /// RFC3339，展示用。

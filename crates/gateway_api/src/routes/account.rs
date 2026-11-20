@@ -14,17 +14,10 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 
 use crate::error::ApiError;
-use crate::mail_rate_limit::MailRateLimiter;
 use crate::routes::auth::AuthUser;
 use crate::routes::password_reset::{error_page, result_page};
 use crate::routes::users::client_ip;
 use crate::state::AppState;
-
-static MAIL_LIMITER: std::sync::OnceLock<MailRateLimiter> = std::sync::OnceLock::new();
-
-fn mail_limiter() -> &'static MailRateLimiter {
-    MAIL_LIMITER.get_or_init(MailRateLimiter::new)
-}
 
 /// POST /api/auth/account/delete —— 202 Accepted（确认邮件已发送）。
 pub async fn request_deletion(
@@ -80,7 +73,7 @@ pub async fn request_recovery(
     Json(req): Json<RecoveryRequest>,
 ) -> Result<StatusCode, ApiError> {
     let ip = client_ip(&headers, addr);
-    if let Err(reason) = mail_limiter().check(&req.email) {
+    if let Err(reason) = state.mail_limiter.check(&req.email) {
         return Err(ApiError::too_many_requests(reason));
     }
     state

@@ -1,44 +1,17 @@
 //! Magic Link 发信频率限制：同邮箱 1 分钟 1 条、1 小时 5 条（进程内实现）。
 //!
 //! 设计稿 AUTH_V2.md §5：量大再换 Redis，结构上只在本模块。
-//! 间隔/上限由环境变量注入（启动时读取），未配置时用默认值。
+//! 间隔/上限由组合根注入（`config::mail_rate_limit_config`），本模块不读环境变量。
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(60);
-const DEFAULT_HOURLY_LIMIT: usize = 5;
-const DEFAULT_HOURLY_WINDOW: Duration = Duration::from_secs(3600);
-
-/// 环境变量名 → 解析后的邮件限流参数。
+/// 邮件限流参数（值对象；环境读取在 config.rs）。
 pub struct MailRateLimitConfig {
     pub min_interval: Duration,
     pub hourly_limit: usize,
     pub hourly_window: Duration,
-}
-
-impl MailRateLimitConfig {
-    /// 从环境读取 `ROVORTEX_MAIL_MIN_INTERVAL_SECS` / `ROVORTEX_MAIL_HOURLY_LIMIT`
-    /// / `ROVORTEX_MAIL_HOURLY_WINDOW_SECS`。解析失败静默回退默认值。
-    pub fn from_env() -> Self {
-        let min_interval = std::env::var("ROVORTEX_MAIL_MIN_INTERVAL_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_MIN_INTERVAL);
-        let hourly_limit = std::env::var("ROVORTEX_MAIL_HOURLY_LIMIT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&n: &usize| n > 0)
-            .unwrap_or(DEFAULT_HOURLY_LIMIT);
-        let hourly_window = std::env::var("ROVORTEX_MAIL_HOURLY_WINDOW_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_HOURLY_WINDOW);
-        Self { min_interval, hourly_limit, hourly_window }
-    }
 }
 
 struct MailboxHistory {
@@ -60,10 +33,6 @@ pub struct MailRateLimiter {
 }
 
 impl MailRateLimiter {
-    pub fn new() -> Self {
-        Self::with_config(MailRateLimitConfig::from_env())
-    }
-
     pub fn with_config(config: MailRateLimitConfig) -> Self {
         Self {
             min_interval: config.min_interval,
@@ -113,7 +82,7 @@ impl MailRateLimiter {
 
 impl Default for MailRateLimiter {
     fn default() -> Self {
-        Self::new()
+        Self::with_config(crate::config::mail_rate_limit_config())
     }
 }
 

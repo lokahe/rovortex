@@ -11,15 +11,8 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 
 use crate::error::ApiError;
-use crate::mail_rate_limit::MailRateLimiter;
 use crate::routes::users::client_ip;
 use crate::state::AppState;
-
-static MAIL_LIMITER: std::sync::OnceLock<MailRateLimiter> = std::sync::OnceLock::new();
-
-fn mail_limiter() -> &'static MailRateLimiter {
-    MAIL_LIMITER.get_or_init(MailRateLimiter::new)
-}
 
 #[derive(Debug, Deserialize)]
 pub struct PasswordResetRequest {
@@ -34,7 +27,7 @@ pub async fn request_reset(
     Json(req): Json<PasswordResetRequest>,
 ) -> Result<StatusCode, ApiError> {
     let ip = client_ip(&headers, addr);
-    if let Err(reason) = mail_limiter().check(&req.email) {
+    if let Err(reason) = state.mail_limiter.check(&req.email) {
         return Err(ApiError::too_many_requests(reason));
     }
     state.users.request_password_reset(&req.email, &ip).await?;
