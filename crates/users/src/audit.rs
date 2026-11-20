@@ -30,6 +30,9 @@ pub enum AuditAction {
     AccountRecoveryRequested,
     AccountRestored,
     AdminForceLogout,
+    AdminDbInsert,
+    AdminDbUpdate,
+    AdminDbDelete,
 }
 
 impl AuditAction {
@@ -57,6 +60,9 @@ impl AuditAction {
             AuditAction::AccountRecoveryRequested => "account_recovery_requested",
             AuditAction::AccountRestored => "account_restored",
             AuditAction::AdminForceLogout => "admin_force_logout",
+            AuditAction::AdminDbInsert => "admin_db_insert",
+            AuditAction::AdminDbUpdate => "admin_db_update",
+            AuditAction::AdminDbDelete => "admin_db_delete",
         }
     }
 }

@@ -1,10 +1,11 @@
-//! 管理端数据库浏览（只读）—— 业务层契约与领域规则。
+//! 管理端数据库浏览（读 + 有限的行级增删改）—— 业务层契约与领域规则。
 //!
-//! 这里只定义：允许浏览哪些表、哪些列算敏感、行数据如何打码；
-//! 具体查询由持久化层实现（storage_pg::PgDbBrowser）。
+//! 这里只定义：允许浏览哪些表、哪些列算敏感、行数据如何打码、
+//! 哪些表/列可写；具体查询由持久化层实现（storage_pg::PgDbBrowser）。
 //! 网关层只做参数解析与 DTO 映射，不接触 SQL。
 
 use serde_json::Value;
+use uuid::Uuid;
 
 /// 允许浏览的表白名单（不含 _sqlx_migrations 等内部表）。
 pub const BROWSABLE_TABLES: &[&str] = &[
@@ -18,12 +19,50 @@ pub const BROWSABLE_TABLES: &[&str] = &[
 /// 值打码的敏感列：只暴露前 8 位 + 长度，足以比对、不足以冒用。
 pub const MASKED_COLUMNS: &[&str] = &["password_hash", "token_hash"];
 
+/// 每表可写列白名单（增改只接受这些列；id/created_at 等由 DB 或应用控制）。
+/// 敏感列（password_hash/token_hash）与 GENERATED 列（*_key）不在内。
+pub const WRITABLE_COLUMNS: &[(&str, &[&str])] = &[
+    (
+        "users",
+        &[
+            "username",
+            "email",
+            "status",
+            "email_verified",
+            "is_admin",
+            "display_name",
+            "avatar_url",
+            "bio",
+            "website_url",
+        ],
+    ),
+    (
+        "refresh_tokens",
+        &["user_id", "expires_at", "revoked_at"],
+    ),
+    (
+        "email_verifications",
+        &["email", "token_hash", "purpose", "user_id", "expires_at", "consumed_at"],
+    ),
+    (
+        "user_identities",
+        &["user_id", "provider", "provider_uid", "email"],
+    ),
+];
+
+/// email_verifications 的 token_hash 例外：创建行必须能写哈希，但不回显。
+/// 上表允许它出现在 WRITABLE_COLUMNS，展示时仍按 MASKED_COLUMNS 打码。
+
 #[derive(Debug, thiserror::Error)]
 pub enum DbBrowseError {
     #[error("unknown table: {0}")]
     UnknownTable(String),
     #[error("unknown column: {0}")]
     UnknownColumn(String),
+    #[error("table is read-only: {0}")]
+    ReadOnly(String),
+    #[error("row not found")]
+    RowNotFound,
     #[error("database error: {0}")]
     Database(String),
 }
@@ -70,6 +109,40 @@ pub trait DbBrowser: Send + Sync {
     async fn browse_rows(&self, params: &BrowseParams) -> Result<Vec<Value>, DbBrowseError>;
     /// 与 browse_rows 同过滤条件下的行数。
     async fn count_rows(&self, table: &str, search: &str) -> Result<i64, DbBrowseError>;
+    /// 插入一行：`columns` 只允许 WRITABLE_COLUMNS 内的列。返回新行 id。
+    async fn insert_row(
+        &self,
+        table: &str,
+        columns: &[(String, Value)],
+    ) -> Result<Uuid, DbBrowseError>;
+    /// 更新一行（按 UUID 主键 id）：`columns` 只允许 WRITABLE_COLUMNS 内的列。
+    async fn update_row(
+        &self,
+        table: &str,
+        id: Uuid,
+        columns: &[(String, Value)],
+    ) -> Result<u64, DbBrowseError>;
+    /// 删除一行（按 UUID 主键 id）。
+    async fn delete_row(&self, table: &str, id: Uuid) -> Result<u64, DbBrowseError>;
+}
+
+/// 校验一组的列名都在该表可写白名单内。
+pub fn resolve_writable_columns(
+    table: &str,
+    columns: &[(String, Value)],
+) -> Result<(), DbBrowseError> {
+    let allowed = WRITABLE_COLUMNS
+        .iter()
+        .find(|(t, _)| *t == table)
+        .map(|(_, cols)| *cols)
+        // 没进白名单的表（audit_logs 等）一律只读
+        .ok_or_else(|| DbBrowseError::ReadOnly(table.to_string()))?;
+    for (name, _) in columns {
+        if !allowed.contains(&name.as_str()) {
+            return Err(DbBrowseError::UnknownColumn(name.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// 校验表名在白名单内。

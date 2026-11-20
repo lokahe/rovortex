@@ -59,7 +59,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/admin/logs/stream", get(admin_logs::stream_logs))
         .route("/api/admin/db/tables", get(db::list_tables))
-        .route("/api/admin/db/tables/{table}", get(db::browse))
+        .route("/api/admin/db/tables/{table}", get(db::browse).post(db::insert_row))
+        .route(
+            "/api/admin/db/tables/{table}/{id}",
+            axum::routing::put(db::update_row).delete(db::delete_row),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_admin,

@@ -8,12 +8,15 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::routes::auth::AdminUser;
 use crate::state::AppState;
+use rovortex_users::audit::{AuditAction, NewAuditLog};
 use rovortex_users::db_browse::{
     BrowseParams, DbBrowseError, default_sort, mask_rows, resolve_sort_column, resolve_table,
+    resolve_writable_columns,
 };
 
 #[derive(Debug, Serialize)]
@@ -127,6 +130,117 @@ fn db_error(e: DbBrowseError) -> ApiError {
     match e {
         DbBrowseError::UnknownTable(t) => ApiError::bad_request(format!("unknown table: {t}")),
         DbBrowseError::UnknownColumn(c) => ApiError::bad_request(format!("unknown column: {c}")),
+        DbBrowseError::ReadOnly(t) => ApiError::bad_request(format!("table is read-only: {t}")),
+        DbBrowseError::RowNotFound => ApiError::not_found(),
         DbBrowseError::Database(m) => ApiError::internal(m),
     }
+}
+
+// ---- 行级写操作（insert / update / delete，全部写审计） ----
+
+#[derive(Debug, Deserialize)]
+pub struct RowPayload {
+    /// 列名 → 值。列名在 WRITABLE_COLUMNS 白名单内才接受。
+    pub columns: std::collections::HashMap<String, Value>,
+}
+
+/// 写操作审计（失败不阻断业务，与其他审计点一致）。
+async fn audit_write(
+    state: &AppState,
+    admin: &AdminUser,
+    action: AuditAction,
+    table: &str,
+    detail: String,
+) {
+    if let Err(e) = state
+        .audit
+        .append(NewAuditLog {
+            user_id: Some(admin.user_id),
+            action,
+            detail: format!("{table}: {detail}"),
+            client_ip: String::new(),
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "failed to append db-write audit log");
+    }
+}
+
+/// POST /api/admin/db/tables/{table} —— 插入一行。
+pub async fn insert_row(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(table): Path<String>,
+    Json(payload): Json<RowPayload>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let table = resolve_table(&table).map_err(db_error)?;
+    let mut columns: Vec<(String, Value)> = payload.columns.into_iter().collect();
+    columns.sort_by(|a, b| a.0.cmp(&b.0));
+    resolve_writable_columns(table, &columns).map_err(db_error)?;
+    let id = state
+        .db_browser
+        .insert_row(table, &columns)
+        .await
+        .map_err(db_error)?;
+    audit_write(
+        &state,
+        &admin,
+        AuditAction::AdminDbInsert,
+        table,
+        format!("id={id} cols={}", columns.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(",")),
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "id": id })))
+}
+
+/// PUT /api/admin/db/tables/{table}/{id} —— 按 id 更新一行。
+pub async fn update_row(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path((table, id)): Path<(String, Uuid)>,
+    Json(payload): Json<RowPayload>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let table = resolve_table(&table).map_err(db_error)?;
+    let mut columns: Vec<(String, Value)> = payload.columns.into_iter().collect();
+    columns.sort_by(|a, b| a.0.cmp(&b.0));
+    if columns.is_empty() {
+        return Err(ApiError::bad_request("no columns to update".into()));
+    }
+    resolve_writable_columns(table, &columns).map_err(db_error)?;
+    let affected = state
+        .db_browser
+        .update_row(table, id, &columns)
+        .await
+        .map_err(db_error)?;
+    if affected == 0 {
+        return Err(ApiError::not_found());
+    }
+    audit_write(
+        &state,
+        &admin,
+        AuditAction::AdminDbUpdate,
+        table,
+        format!("id={id} cols={}", columns.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(",")),
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "updated": affected })))
+}
+
+/// DELETE /api/admin/db/tables/{table}/{id} —— 按 id 删除一行。
+pub async fn delete_row(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path((table, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let table = resolve_table(&table).map_err(db_error)?;
+    let affected = state
+        .db_browser
+        .delete_row(table, id)
+        .await
+        .map_err(db_error)?;
+    if affected == 0 {
+        return Err(ApiError::not_found());
+    }
+    audit_write(&state, &admin, AuditAction::AdminDbDelete, table, format!("id={id}")).await;
+    Ok(Json(serde_json::json!({ "deleted": affected })))
 }

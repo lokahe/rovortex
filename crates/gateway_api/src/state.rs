@@ -75,6 +75,8 @@ pub struct AppState {
     pub oauth_github: Option<crate::routes::oauth::GithubOAuthConfig>,
     /// 管理端数据库浏览（只读旁路的业务层抽象，不再暴露裸连接池）。
     pub db_browser: Arc<dyn DbBrowser>,
+    /// 审计日志仓储（admin db 增删改的证据链写入点）。
+    pub audit: Arc<dyn rovortex_users::AuditRepository>,
     /// 发信频率限制（magic link / 找回密码 / 注销恢复共用一个实例）。
     pub mail_limiter: Arc<crate::mail_rate_limit::MailRateLimiter>,
 }
@@ -112,7 +114,7 @@ impl AppState {
         let admin_service = Arc::new(AdminService::new(
             repo,
             refresh_repo,
-            audit_repo,
+            audit_repo.clone(),
             identity_repo,
         ));
 
@@ -135,7 +137,8 @@ impl AppState {
                     client_secret,
                 }
             }),
-            db_browser: Arc::new(PgDbBrowser::from_pool(pool)),
+            db_browser: Arc::new(PgDbBrowser::from_pool(pool.clone())),
+            audit: audit_repo.clone(),
             mail_limiter: Arc::new(crate::mail_rate_limit::MailRateLimiter::with_config(
                 crate::config::mail_rate_limit_config(),
             )),

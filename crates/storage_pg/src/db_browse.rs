@@ -7,6 +7,7 @@
 use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::Row;
+use uuid::Uuid;
 
 use rovortex_users::db_browse::{
     BrowseParams, ColumnInfo, DbBrowseError, DbBrowser, TableSummary, BROWSABLE_TABLES,
@@ -19,6 +20,42 @@ pub struct PgDbBrowser {
 impl PgDbBrowser {
     pub fn from_pool(pool: sqlx::PgPool) -> Self {
         Self { pool }
+    }
+
+    /// 批量查列类型并做三重校验：表在白名单、列在白名单、列确实属于该表。
+    /// 返回顺序与 `columns` 一致（information_schema 的类型名可直接拼 CAST）。
+    async fn column_types(
+        &self,
+        table: &str,
+        columns: &[(String, Value)],
+    ) -> Result<Vec<String>, DbBrowseError> {
+        rovortex_users::db_browse::resolve_table(table)?;
+        rovortex_users::db_browse::resolve_writable_columns(table, columns)?;
+        let valid = self.describe(table).await?;
+        columns
+            .iter()
+            .map(|(name, _)| {
+                valid
+                    .iter()
+                    .find(|c| c.name == name.as_str())
+                    .map(|c| c.data_type.clone())
+                    .ok_or_else(|| DbBrowseError::UnknownColumn(name.clone()))
+            })
+            .collect()
+    }
+}
+
+/// JSON 值 → PG 文本字面量（随后 CAST 成列类型）：
+/// null 保持 NULL 语义（None），其余取原始标量值。
+/// 注意不能用 Value::to_string()——那是 JSON 序列化，String 会带上引号。
+fn value_as_text(v: &Value) -> Option<String> {
+    match v {
+        Value::Null => None,
+        Value::Bool(b) => Some(b.to_string()),
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        // 数组/对象（当前白名单列用不到）走 JSON 文本，PG 端可 CAST 解析
+        other => Some(other.to_string()),
     }
 }
 
@@ -101,5 +138,68 @@ impl DbBrowser for PgDbBrowser {
             .await
             .map_err(DbBrowseError::database)
         }
+    }
+
+    /// 值统一按 TEXT 绑定，由 `CAST($n AS <列类型>)` 转成目标类型——
+    /// serde_json::Value 直接绑定会被 sqlx 声明成 jsonb，遇到 varchar/bool/
+    /// timestamptz 列必然报类型不符。列类型来自 describe（information_schema）。
+    async fn insert_row(
+        &self,
+        table: &str,
+        columns: &[(String, Value)],
+    ) -> Result<Uuid, DbBrowseError> {
+        let types = self.column_types(table, columns).await?;
+        let id = Uuid::now_v7();
+        let placeholders: Vec<String> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("CAST(${} AS {})", i + 2, types[i]))
+            .collect();
+        let names: Vec<&str> = columns.iter().map(|(n, _)| n.as_str()).collect();
+        let sql = format!(
+            "INSERT INTO {table} (id, {}) VALUES ($1, {}) RETURNING id",
+            names.join(", "),
+            placeholders.join(", "),
+        );
+        let mut q = sqlx::query_scalar::<_, Uuid>(&sql).bind(id);
+        for (_, v) in columns {
+            q = q.bind(value_as_text(v));
+        }
+        q.fetch_one(&self.pool).await.map_err(DbBrowseError::database)
+    }
+
+    async fn update_row(
+        &self,
+        table: &str,
+        id: Uuid,
+        columns: &[(String, Value)],
+    ) -> Result<u64, DbBrowseError> {
+        let types = self.column_types(table, columns).await?;
+        let sets: Vec<String> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, (n, _))| format!("{n} = CAST(${} AS {})", i + 1, types[i]))
+            .collect();
+        let id_ph = columns.len() + 1;
+        let sql = format!("UPDATE {table} SET {} WHERE id = ${id_ph}", sets.join(", "));
+        let mut q = sqlx::query(&sql);
+        for (_, v) in columns {
+            q = q.bind(value_as_text(v));
+        }
+        let res = q
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(DbBrowseError::database)?;
+        Ok(res.rows_affected())
+    }
+
+    async fn delete_row(&self, table: &str, id: Uuid) -> Result<u64, DbBrowseError> {
+        let res = sqlx::query(&format!("DELETE FROM {table} WHERE id = $1"))
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(DbBrowseError::database)?;
+        Ok(res.rows_affected())
     }
 }
