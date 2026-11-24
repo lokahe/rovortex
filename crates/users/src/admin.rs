@@ -79,7 +79,10 @@ impl AdminService {
                     tracing::info!(email = %user.email, user_id = %user.id, "promoted to admin");
                 }
             } else {
-                tracing::warn!(email, "admin email not found among users; will promote on next boot after the account exists");
+                tracing::warn!(
+                    email,
+                    "admin email not found among users; will promote on next boot after the account exists"
+                );
             }
         }
         Ok(())
@@ -98,7 +101,11 @@ impl AdminService {
     }
 
     /// 单用户详情聚合（实体 + 身份绑定 + 最近 limit 条审计）。
-    pub async fn user_detail(&self, user_id: Uuid, audit_limit: i64) -> Result<UserDetail, UserError> {
+    pub async fn user_detail(
+        &self,
+        user_id: Uuid,
+        audit_limit: i64,
+    ) -> Result<UserDetail, UserError> {
         let user = self
             .repo
             .find_by_id(user_id)
@@ -126,7 +133,10 @@ impl AdminService {
     }
 
     /// 仪表盘统计：用户总数 + since 起各审计动作计数。
-    pub async fn stats(&self, since: chrono::DateTime<chrono::Utc>) -> Result<AdminStats, UserError> {
+    pub async fn stats(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AdminStats, UserError> {
         let total_users = self.repo.count_users(None).await?;
         let events = self.repo.count_audit_by_action(since).await?;
         Ok(AdminStats {

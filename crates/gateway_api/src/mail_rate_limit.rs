@@ -21,7 +21,9 @@ struct MailboxHistory {
 
 impl MailboxHistory {
     fn new() -> Self {
-        Self { recent: VecDeque::new() }
+        Self {
+            recent: VecDeque::new(),
+        }
     }
 }
 
@@ -98,7 +100,9 @@ mod tests {
             hourly_window: Duration::from_secs(3600),
         });
         assert!(limiter.check("a@b.com").is_ok(), "first send allowed");
-        let err = limiter.check("a@b.com").expect_err("second send within interval must be rejected");
+        let err = limiter
+            .check("a@b.com")
+            .expect_err("second send within interval must be rejected");
         assert!(err.contains("wait a minute"));
         // 其他邮箱不受影响
         assert!(limiter.check("other@b.com").is_ok());
@@ -113,12 +117,17 @@ mod tests {
         });
         // 同邮箱伪造历史直接测上限
         let mut mailboxes = limiter.mailboxes.lock().unwrap();
-        let hist = mailboxes.entry("x@y.com".to_string()).or_insert_with(MailboxHistory::new);
+        let hist = mailboxes
+            .entry("x@y.com".to_string())
+            .or_insert_with(MailboxHistory::new);
         for i in 0..5 {
-            hist.recent.push_back(Instant::now() - Duration::from_secs(120 * (i as u64 + 1)));
+            hist.recent
+                .push_back(Instant::now() - Duration::from_secs(120 * (i as u64 + 1)));
         }
         drop(mailboxes);
-        let err = limiter.check("x@y.com").expect_err("6th send within window must be rejected");
+        let err = limiter
+            .check("x@y.com")
+            .expect_err("6th send within window must be rejected");
         assert!(err.contains("hourly"));
     }
 

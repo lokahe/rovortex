@@ -1,12 +1,12 @@
 //! 受保护的用户接口：要求有效的 Bearer token。
 
 use axum::Json;
-use axum::http::StatusCode;
 use axum::extract::{ConnectInfo, Path, State};
-use std::net::SocketAddr;
+use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use rovortex_users::{ProfilePatch, UserError};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -73,6 +73,8 @@ pub struct IdentityResponse {
     pub provider: String,
     pub email: Option<String>,
     pub has_raw_profile: bool,
+    /// 平台侧头像 URL（github raw.avatar_url / google raw.picture；magic 无）。
+    pub avatar_url: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -174,10 +176,7 @@ pub async fn update_profile(
         bio: req.bio,
         website_url: req.website_url,
     };
-    let user = state
-        .users
-        .update_profile(auth.user_id, patch, &ip)
-        .await?;
+    let user = state.users.update_profile(auth.user_id, patch, &ip).await?;
     Ok(Json(me_response(user)))
 }
 
@@ -191,13 +190,28 @@ pub async fn list_identities(
         identities
             .into_iter()
             .map(|i| IdentityResponse {
-                provider: i.provider,
+                provider: i.provider.clone(),
                 email: i.email,
                 has_raw_profile: i.raw_profile.is_some(),
+                avatar_url: identity_avatar_url(&i.provider, i.raw_profile.as_ref()),
                 created_at: i.created_at,
             })
             .collect(),
     ))
+}
+
+/// 平台原始资料里的头像 URL：github 存 avatar_url，google 存 picture。
+fn identity_avatar_url(provider: &str, raw: Option<&serde_json::Value>) -> Option<String> {
+    let raw = raw?;
+    let key = match provider {
+        "github" => "avatar_url",
+        "google" => "picture",
+        _ => return None,
+    };
+    raw.get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug, Serialize)]

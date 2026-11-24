@@ -35,11 +35,7 @@ pub trait UserRepository: Send + Sync {
     async fn find_by_id(&self, id: uuid::Uuid) -> Result<Option<User>, UserError>;
 
     /// 更新密码哈希（改密码）。调用方保证已完成旧密码校验。
-    async fn update_password_hash(
-        &self,
-        id: uuid::Uuid,
-        new_hash: &str,
-    ) -> Result<(), UserError>;
+    async fn update_password_hash(&self, id: uuid::Uuid, new_hash: &str) -> Result<(), UserError>;
 
     /// 标记邮箱已验证（注册验证信确认后）。
     async fn mark_email_verified(&self, id: uuid::Uuid) -> Result<(), UserError>;

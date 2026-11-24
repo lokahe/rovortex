@@ -4,11 +4,11 @@
 //! request_id 同时回写到响应头 `x-request-id`，便于客户端报障时对账。
 
 use axum::extract::State;
-use axum::http::header::HeaderName;
 use axum::http::HeaderValue;
+use axum::http::header::HeaderName;
 use axum::middleware::Next;
 use axum::response::Response;
-use tracing::{info_span, Instrument};
+use tracing::{Instrument, info_span};
 
 use crate::state::AppState;
 
@@ -49,18 +49,18 @@ pub async fn request_id_and_log(
         let elapsed_ms = start.elapsed().as_millis() as u64;
 
         let status = response.status();
-        tracing::info!(
-            status = status.as_u16(),
-            elapsed_ms,
-            "request completed"
-        );
+        tracing::info!(status = status.as_u16(), elapsed_ms, "request completed");
 
         // 访问日志同步进进程内 LogBuffer（admin 日志页数据源）。
         // 直接组装而非依赖 tracing 层：method/path 在 span 字段里，
         // BufferLayer 的 event 回调拿不到。
         if track {
             state.log_buffer.push(crate::log_buffer::LogEntry::access(
-                if status.is_server_error() { "ERROR" } else { "INFO" },
+                if status.is_server_error() {
+                    "ERROR"
+                } else {
+                    "INFO"
+                },
                 "gateway_api::access",
                 format!("request completed"),
                 Some(request_id.clone()),

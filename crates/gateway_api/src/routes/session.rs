@@ -3,10 +3,10 @@
 use axum::Json;
 use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
-use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
 use rovortex_users::User;
 use serde::Deserialize;
+use std::net::SocketAddr;
 
 use crate::error::ApiError;
 use crate::routes::users::AuthResponse;

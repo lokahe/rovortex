@@ -2,13 +2,13 @@
 //!
 //! 协议细节只住本模块；业务层只见 `(provider, provider_uid, email)` 三元组。
 
-use axum::extract::{ConnectInfo, State};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
-use std::net::SocketAddr;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Redirect, Response};
 use rovortex_users::ExternalProfile;
 use serde::Deserialize;
+use std::net::SocketAddr;
 
 use crate::state::AppState;
 
@@ -30,13 +30,8 @@ const STATE_COOKIE_MAX_AGE_SECS: i64 = 600;
 /// GET /api/auth/oauth/github —— 302 跳 GitHub 授权页。
 ///
 /// 生成随机 state 存入短命 HttpOnly cookie，回调时比对防 CSRF。
-pub async fn github_authorize(
-    State(state): State<AppState>,
-) -> Result<Response, ApiError> {
-    let config = state
-        .oauth_github
-        .as_ref()
-        .ok_or(ApiError::not_found())?;
+pub async fn github_authorize(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let config = state.oauth_github.as_ref().ok_or(ApiError::not_found())?;
     let oauth_state = new_oauth_state();
 
     // scope=user:email 让 GitHub 报告邮箱（可能含私有邮箱）
@@ -74,10 +69,7 @@ pub async fn github_callback(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     axum::extract::Query(query): axum::extract::Query<CallbackQuery>,
 ) -> Result<Response, ApiError> {
-    let config = state
-        .oauth_github
-        .as_ref()
-        .ok_or(ApiError::not_found())?;
+    let config = state.oauth_github.as_ref().ok_or(ApiError::not_found())?;
 
     // 用户拒绝授权：GitHub 常规做法是 302 回前端错误页；这里统一 422 简化
     if query.error.is_some() {
@@ -324,13 +316,8 @@ const GOOGLE_USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/useri
 const GOOGLE_STATE_COOKIE: &str = "rovortex_oauth_state_google";
 
 /// GET /api/auth/oauth/google —— 302 跳 Google 授权页。
-pub async fn google_authorize(
-    State(state): State<AppState>,
-) -> Result<Response, ApiError> {
-    let config = state
-        .oauth_google
-        .as_ref()
-        .ok_or(ApiError::not_found())?;
+pub async fn google_authorize(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let config = state.oauth_google.as_ref().ok_or(ApiError::not_found())?;
     let oauth_state = new_oauth_state();
 
     // scope=openid email profile；access_type=online（不取 refresh token，只登录用）
@@ -360,10 +347,7 @@ pub async fn google_callback(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     axum::extract::Query(query): axum::extract::Query<GoogleCallbackQuery>,
 ) -> Result<Response, ApiError> {
-    let config = state
-        .oauth_google
-        .as_ref()
-        .ok_or(ApiError::not_found())?;
+    let config = state.oauth_google.as_ref().ok_or(ApiError::not_found())?;
 
     if query.error.is_some() {
         return Err(ApiError::bad_request("oauth denied".into()));

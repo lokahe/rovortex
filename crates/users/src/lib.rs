@@ -24,8 +24,8 @@ pub mod refresh_token;
 pub mod repository;
 pub mod service;
 
-pub use audit::{AuditAction, AuditEntry, AuditRepository, NewAuditLog};
 pub use admin::{AdminService, AdminStats, UserDetail, UserPage};
+pub use audit::{AuditAction, AuditEntry, AuditRepository, NewAuditLog};
 pub use auth::TokenSigner;
 pub use db_browse::{BrowseParams, ColumnInfo, DbBrowseError, DbBrowser, TableSummary};
 pub use domain::{NewUser, User, UserError};
@@ -39,4 +39,4 @@ pub use oauth_identity::{
 pub use rate_limit::{LoginGuard, guard_key};
 pub use refresh_token::{NewRefreshToken, RefreshTokenRepository, SessionView};
 pub use repository::UserRepository;
-pub use service::{ProfilePatch, SessionContext, UserService, UserServiceConfig};
+pub use service::{EmailChannels, ProfilePatch, SessionContext, UserService, UserServiceConfig};

@@ -4,10 +4,10 @@
 //! 邮箱不发信），发信走进程内 MailRateLimiter（同邮箱 1 分钟 1 条）。
 //! 码通道确认走 ConfirmCodeLimiter（5 次/15 分钟 per ip|email，同 signup）。
 
+use axum::Json;
 use axum::extract::{ConnectInfo, Form, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
 use std::net::SocketAddr;
 
@@ -81,7 +81,10 @@ pub async fn confirm_form(
     // token 只做格式预检（真实校验在提交一步，避免 GET 泄露 token 是否有效）；
     // 这里始终渲染表单，提交时才消费 token。
     if params.token.is_empty() {
-        return Err(error_page("链接无效", "重置链接无效或已过期，请重新发起密码重置。"));
+        return Err(error_page(
+            "链接无效",
+            "重置链接无效或已过期，请重新发起密码重置。",
+        ));
     }
     Ok(form_page(&params.token))
 }

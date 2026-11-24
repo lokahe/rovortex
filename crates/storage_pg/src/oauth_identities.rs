@@ -4,9 +4,7 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use rovortex_users::{
-    ExternalIdentity, NewExternalIdentity, OauthIdentityRepository, UserError,
-};
+use rovortex_users::{ExternalIdentity, NewExternalIdentity, OauthIdentityRepository, UserError};
 
 mod row {
     use chrono::{DateTime, Utc};

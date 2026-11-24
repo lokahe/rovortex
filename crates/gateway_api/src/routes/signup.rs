@@ -4,10 +4,10 @@
 //! confirm-code 端点自带限流（每邮箱+IP 5 次 / 15 分钟，进程内），
 //! 6 位码空间 10^6，限流后爆破不可行。
 
+use axum::Json;
 use axum::extract::{ConnectInfo, Form, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::error::ApiError;
-use crate::routes::users::{client_ip, AuthResponse};
+use crate::routes::users::{AuthResponse, client_ip};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -62,21 +62,29 @@ use std::collections::VecDeque;
 
 impl ConfirmCodeLimiter {
     pub fn new() -> Self {
-        Self { attempts: Mutex::new(HashMap::new()) }
+        Self {
+            attempts: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn check(&self, key: &str) -> Result<(), &'static str> {
         let now = Instant::now();
         let mut attempts = self.attempts.lock().unwrap();
         let hist = attempts.entry(key.to_string()).or_default();
-        while hist.front().is_some_and(|t| now.duration_since(*t) > CODE_ATTEMPTS_WINDOW) {
+        while hist
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > CODE_ATTEMPTS_WINDOW)
+        {
             hist.pop_front();
         }
         if hist.len() >= CODE_ATTEMPTS_LIMIT {
             return Err("too many attempts, try again later");
         }
         hist.push_back(now);
-        attempts.retain(|_, h| h.back().is_some_and(|t| now.duration_since(*t) <= CODE_ATTEMPTS_WINDOW));
+        attempts.retain(|_, h| {
+            h.back()
+                .is_some_and(|t| now.duration_since(*t) <= CODE_ATTEMPTS_WINDOW)
+        });
         Ok(())
     }
 }
@@ -127,7 +135,10 @@ pub async fn confirm_form(
     axum::extract::Query(params): axum::extract::Query<ConfirmParams>,
 ) -> Result<Response, Response> {
     if params.token.is_empty() {
-        return Err(error_page("链接无效", "注册链接无效或已过期，请回到应用重新发起注册。"));
+        return Err(error_page(
+            "链接无效",
+            "注册链接无效或已过期，请回到应用重新发起注册。",
+        ));
     }
     Ok(form_page(&params.token))
 }
@@ -148,7 +159,12 @@ pub async fn confirm_submit(
     let ip = client_ip(&headers, addr);
     match state
         .users
-        .confirm_signup_link(&form.token, &form.password, &ip, &crate::routes::users::session_context(&headers, addr))
+        .confirm_signup_link(
+            &form.token,
+            &form.password,
+            &ip,
+            &crate::routes::users::session_context(&headers, addr),
+        )
         .await
     {
         Ok(_) => Ok(result_page(

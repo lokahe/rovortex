@@ -96,7 +96,12 @@ impl LogFilter {
             }
         }
         if let Some(q) = &self.q {
-            let hay = format!("{} {} {}", e.message, e.target, e.path.clone().unwrap_or_default());
+            let hay = format!(
+                "{} {} {}",
+                e.message,
+                e.target,
+                e.path.clone().unwrap_or_default()
+            );
             if !hay.to_lowercase().contains(&q.to_lowercase()) {
                 return false;
             }

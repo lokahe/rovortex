@@ -5,9 +5,9 @@
 
 use std::convert::Infallible;
 
+use axum::Json;
 use axum::extract::{Query, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::Json;
 use futures_util::Stream;
 use serde::Deserialize;
 
@@ -59,18 +59,14 @@ pub async fn stream_logs(
                     Ok(entry) => {
                         if filter.matches(&entry) {
                             let json = serde_json::to_string(&entry).unwrap_or_default();
-                            let event = SseEvent::default()
-                                .event("log")
-                                .data(json);
+                            let event = SseEvent::default().event("log").data(json);
                             return Some((Ok(event), (rx, filter, buffer)));
                         }
                         // 不匹配筛选：继续等下一条。
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // 消费慢了跳帧：发一条提示，前端可显示「已省略 N 条」。
-                        let event = SseEvent::default()
-                            .event("lagged")
-                            .data("{}");
+                        let event = SseEvent::default().event("lagged").data("{}");
                         return Some((Ok(event), (rx, filter, buffer)));
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {

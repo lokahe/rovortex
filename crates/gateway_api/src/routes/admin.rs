@@ -111,7 +111,11 @@ pub async fn user_detail(
     _admin: AdminUser,
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<AdminUserDetail>, ApiError> {
-    let detail = state.admin.user_detail(user_id, 20).await.map_err(|_| ApiError::not_found())?;
+    let detail = state
+        .admin
+        .user_detail(user_id, 20)
+        .await
+        .map_err(|_| ApiError::not_found())?;
 
     Ok(Json(AdminUserDetail {
         user: to_view(detail.user),

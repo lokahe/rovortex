@@ -63,6 +63,7 @@ impl EmailVerificationRepository for PgEmailVerificationRepository {
                 "password_reset" => VerificationPurpose::PasswordReset,
                 "account_deletion" => VerificationPurpose::AccountDeletion,
                 "account_recovery" => VerificationPurpose::AccountRecovery,
+                "email_entry" => VerificationPurpose::EmailEntry,
                 _ => VerificationPurpose::Signup,
             };
             (r.email, purpose, r.user_id)

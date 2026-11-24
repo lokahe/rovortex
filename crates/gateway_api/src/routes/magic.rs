@@ -1,8 +1,8 @@
 //! Magic Link 免密登录：发信 + 验证签会话。
 
+use axum::Json;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::Json;
 use serde::Deserialize;
 use std::net::SocketAddr;
 
@@ -43,7 +43,10 @@ pub async fn verify_magic_link(
 ) -> Result<Json<crate::routes::users::AuthResponse>, ApiError> {
     let ip = client_ip(&headers, addr);
     let ctx = crate::routes::users::session_context(&headers, addr);
-    let session = state.users.verify_magic_link(&query.token, &ip, &ctx).await?;
+    let session = state
+        .users
+        .verify_magic_link(&query.token, &ip, &ctx)
+        .await?;
     let auth = auth_response(
         &state.tokens,
         session.user,

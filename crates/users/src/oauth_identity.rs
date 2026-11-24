@@ -68,11 +68,7 @@ pub trait OauthIdentityRepository: Send + Sync {
     ) -> Result<Vec<ExternalIdentity>, crate::domain::UserError>;
 
     /// 解绑：删除用户的指定 provider 身份。
-    async fn remove(
-        &self,
-        user_id: Uuid,
-        provider: &str,
-    ) -> Result<(), crate::domain::UserError>;
+    async fn remove(&self, user_id: Uuid, provider: &str) -> Result<(), crate::domain::UserError>;
 
     /// 刷新平台原始资料缓存（每次登录调用；无资料传 None 不动旧值）。
     async fn update_raw_profile(

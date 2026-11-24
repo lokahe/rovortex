@@ -4,7 +4,9 @@ pub mod account;
 pub mod admin;
 pub mod admin_logs;
 pub mod auth;
+pub mod config;
 pub mod db;
+pub mod email_entry;
 pub mod health;
 pub mod magic;
 pub mod metrics;
@@ -29,10 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/users/me/email", put(users_me::change_email))
         .route("/api/users/me/username", put(users_me::change_username))
         .route("/api/users/me/profile", patch(users_me::update_profile))
-        .route(
-            "/api/users/me/identities",
-            get(users_me::list_identities),
-        )
+        .route("/api/users/me/identities", get(users_me::list_identities))
         .route(
             "/api/users/me/identities/{provider}",
             delete(users_me::unbind_identity),
@@ -52,19 +51,27 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/users", get(admin::list_users))
         .route("/api/admin/users/{id}", get(admin::user_detail))
         .route("/api/admin/users/{id}/ban", put(admin::set_ban))
-        .route("/api/admin/users/{id}/force-logout", post(admin::force_logout))
-        .route("/api/admin/stats", get(admin::stats))
         .route(
-            "/api/admin/logs",
-            get(admin_logs::list_logs),
+            "/api/admin/users/{id}/force-logout",
+            post(admin::force_logout),
         )
+        .route("/api/admin/stats", get(admin::stats))
+        .route("/api/admin/logs", get(admin_logs::list_logs))
         .route("/api/admin/logs/stream", get(admin_logs::stream_logs))
         .route("/api/admin/db/tables", get(db::list_tables))
-        .route("/api/admin/db/tables/{table}", get(db::browse).post(db::insert_row))
+        .route(
+            "/api/admin/db/tables/{table}",
+            get(db::browse).post(db::insert_row),
+        )
         .route(
             "/api/admin/db/tables/{table}/{id}",
             axum::routing::put(db::update_row).delete(db::delete_row),
         )
+        .route(
+            "/api/admin/config",
+            get(config::get_config).put(config::update_config),
+        )
+        .route("/api/admin/config/restart", post(config::restart_container))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_admin,
@@ -77,24 +84,59 @@ pub fn router(state: AppState) -> Router {
         .route("/api/users/login", post(users::login))
         .route("/api/auth/signup/request", post(signup::request_signup))
         .route("/api/auth/signup/confirm-code", post(signup::confirm_code))
-        .route("/api/auth/signup/confirm", get(signup::confirm_form).post(signup::confirm_submit))
+        .route(
+            "/api/auth/signup/confirm",
+            get(signup::confirm_form).post(signup::confirm_submit),
+        )
         .route("/api/auth/refresh", post(session::refresh))
         .route("/api/auth/logout", post(session::logout))
-        .route("/api/auth/verify-email/request", post(verify_email::request_verification))
+        .route(
+            "/api/auth/verify-email/request",
+            post(verify_email::request_verification),
+        )
         .route("/api/auth/verify-email/confirm", get(verify_email::confirm))
-        .route("/api/auth/email-change/confirm", get(verify_email::confirm_email_change))
+        .route(
+            "/api/auth/email-change/confirm",
+            get(verify_email::confirm_email_change),
+        )
         .route("/api/auth/oauth/github", get(oauth::github_authorize))
-        .route("/api/auth/oauth/github/callback", get(oauth::github_callback))
+        .route(
+            "/api/auth/oauth/github/callback",
+            get(oauth::github_callback),
+        )
         .route("/api/auth/oauth/google", get(oauth::google_authorize))
-        .route("/api/auth/oauth/google/callback", get(oauth::google_callback))
+        .route(
+            "/api/auth/oauth/google/callback",
+            get(oauth::google_callback),
+        )
         .route("/api/auth/magic-link", post(magic::request_magic_link))
         .route("/api/auth/magic-link/verify", get(magic::verify_magic_link))
-        .route("/api/auth/password-reset/request", post(password_reset::request_reset))
-        .route("/api/auth/password-reset/confirm-code", post(password_reset::confirm_code))
-        .route("/api/auth/password-reset/confirm", get(password_reset::confirm_form).post(password_reset::confirm_submit))
+        .route("/api/auth/email-entry", post(email_entry::request_entry))
+        .route(
+            "/api/auth/email-entry/confirm",
+            post(email_entry::confirm_entry),
+        )
+        .route(
+            "/api/auth/password-reset/request",
+            post(password_reset::request_reset),
+        )
+        .route(
+            "/api/auth/password-reset/confirm-code",
+            post(password_reset::confirm_code),
+        )
+        .route(
+            "/api/auth/password-reset/confirm",
+            get(password_reset::confirm_form).post(password_reset::confirm_submit),
+        )
         .route("/api/auth/account/recover", post(account::request_recovery))
-        .route("/api/auth/account/confirm-deletion", get(account::confirm_deletion))
-        .route("/api/auth/account/confirm-recovery", get(account::confirm_recovery))
+        .route(
+            "/api/auth/account/confirm-deletion",
+            get(account::confirm_deletion),
+        )
+        .route(
+            "/api/auth/account/confirm-recovery",
+            get(account::confirm_recovery),
+        )
         .merge(protected)
         .merge(admin_routes)
         .with_state(state)
