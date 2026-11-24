@@ -50,6 +50,11 @@ services:
       RUST_LOG: info
     ports:
       - "8080:8080"
+    volumes:
+      # admin 配置页读写 .env（/app/config/.env）；宿主机侧即 /srv/rovortex/.env
+      - /srv/rovortex:/app/config
+      # admin 配置页重启自身容器（docker API over unix socket）
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       pg:
         condition: service_healthy

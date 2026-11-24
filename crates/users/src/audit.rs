@@ -34,6 +34,7 @@ pub enum AuditAction {
     AdminDbInsert,
     AdminDbUpdate,
     AdminDbDelete,
+    AdminConfigUpdate,
 }
 
 impl AuditAction {
@@ -65,6 +66,7 @@ impl AuditAction {
             AuditAction::AdminDbInsert => "admin_db_insert",
             AuditAction::AdminDbUpdate => "admin_db_update",
             AuditAction::AdminDbDelete => "admin_db_delete",
+            AuditAction::AdminConfigUpdate => "admin_config_update",
         }
     }
 }

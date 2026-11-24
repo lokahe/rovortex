@@ -4,6 +4,7 @@ pub mod account;
 pub mod admin;
 pub mod admin_logs;
 pub mod auth;
+pub mod config;
 pub mod db;
 pub mod health;
 pub mod magic;
@@ -65,6 +66,8 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/db/tables/{table}/{id}",
             axum::routing::put(db::update_row).delete(db::delete_row),
         )
+        .route("/api/admin/config", get(config::get_config).put(config::update_config))
+        .route("/api/admin/config/restart", post(config::restart_container))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_admin,
