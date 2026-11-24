@@ -36,16 +36,28 @@ pub const REDACTED: &str = "••••••••（未修改）";
 
 /// 已知配置键的说明（前端展示用）；未知键仍展示但说明为空。
 pub const KEY_DOCS: &[(&str, &str)] = &[
-    ("ROVORTEX_JWT_SECRET", "JWT HS256 签名密钥。改了所有已登录 token 立即失效"),
+    (
+        "ROVORTEX_JWT_SECRET",
+        "JWT HS256 签名密钥。改了所有已登录 token 立即失效",
+    ),
     ("RESEND_API_KEY", "Resend 发信 API key（re_ 开头）"),
     ("ROVORTEX_MAIL_FROM", "发件人地址，如 noreply@lokahe.top"),
     ("ROVORTEX_VERIFY_URL_BASE", "验证邮件确认链接前缀"),
     ("OAUTH_GITHUB_CLIENT_ID", "GitHub OAuth App Client ID"),
-    ("OAUTH_GITHUB_CLIENT_SECRET", "GitHub OAuth App Client Secret"),
+    (
+        "OAUTH_GITHUB_CLIENT_SECRET",
+        "GitHub OAuth App Client Secret",
+    ),
     ("OAUTH_GOOGLE_CLIENT_ID", "Google OAuth Client ID"),
     ("OAUTH_GOOGLE_CLIENT_SECRET", "Google OAuth Client Secret"),
-    ("ROVORTEX_ADMIN_EMAILS", "管理员邮箱名单（逗号分隔；启动时提升 is_admin）"),
-    ("ROVORTEX_CORS_ORIGINS", "跨域允许来源（逗号分隔；空 = 拒绝所有跨域）"),
+    (
+        "ROVORTEX_ADMIN_EMAILS",
+        "管理员邮箱名单（逗号分隔；启动时提升 is_admin）",
+    ),
+    (
+        "ROVORTEX_CORS_ORIGINS",
+        "跨域允许来源（逗号分隔；空 = 拒绝所有跨域）",
+    ),
     ("ROVORTEX_LOGIN_MAX_FAILURES", "登录失败锁定阈值（次）"),
     ("ROVORTEX_LOGIN_LOCK_WINDOW_SECS", "登录锁定时长（秒）"),
     ("ROVORTEX_MAIL_MIN_INTERVAL_SECS", "同类邮件最小间隔（秒）"),
@@ -53,7 +65,10 @@ pub const KEY_DOCS: &[(&str, &str)] = &[
     ("ROVORTEX_MAIL_HOURLY_WINDOW_SECS", "每小时限额窗口（秒）"),
     ("ROVORTEX_LOG_BUFFER_CAPACITY", "内存日志环形缓冲条数"),
     ("ROVORTEX_REFRESH_TTL_DAYS", "refresh token 有效期（天）"),
-    ("ROVORTEX_EMAIL_VERIFICATION_TTL_MINS", "验证链接/验证码有效期（分钟）"),
+    (
+        "ROVORTEX_EMAIL_VERIFICATION_TTL_MINS",
+        "验证链接/验证码有效期（分钟）",
+    ),
     ("ROVORTEX_DELETION_GRACE_DAYS", "注销冷静期（天）"),
     ("ROVORTEX_PASSWORD_MIN_LENGTH", "密码最小长度"),
     ("ROVORTEX_PASSWORD_MAX_LENGTH", "密码最大长度"),
@@ -116,7 +131,9 @@ const WIRED_KEYS: &[&str] = &[
 
 /// .env 在容器内的挂载路径；本地测试可用 ROVORTEX_ENV_FILE 覆盖。
 fn env_path() -> PathBuf {
-    std::env::var("ROVORTEX_ENV_FILE").unwrap_or_else(|_| ENV_FILE.to_string()).into()
+    std::env::var("ROVORTEX_ENV_FILE")
+        .unwrap_or_else(|_| ENV_FILE.to_string())
+        .into()
 }
 
 /// 解析 .env 文本为有序 K-V（保留重复键的最后值；行注释跳过）。
@@ -167,7 +184,11 @@ pub async fn get_config(
             continue;
         }
         let secret = SECRET_KEYS.contains(&k.as_str());
-        let shown = if secret { REDACTED.to_string() } else { v.clone() };
+        let shown = if secret {
+            REDACTED.to_string()
+        } else {
+            v.clone()
+        };
         let doc = KEY_DOCS
             .iter()
             .find(|(dk, _)| *dk == k)
@@ -186,10 +207,7 @@ pub async fn get_config(
         if map.contains_key(*k) || HIDDEN_KEYS.contains(k) {
             continue;
         }
-        if WIRED_KEYS.contains(k)
-            || k.starts_with("EMAIL_")
-            || k.starts_with("ROVORTEX_")
-        {
+        if WIRED_KEYS.contains(k) || k.starts_with("EMAIL_") || k.starts_with("ROVORTEX_") {
             entries.push(ConfigEntry {
                 key: k.to_string(),
                 value: String::new(),
@@ -217,7 +235,9 @@ pub struct UpdateConfigRequest {
 /// 校验单条值的合法性（只挡格式明显错的，不做语义校验）。
 fn validate_value(key: &str, value: &str) -> Result<(), ApiError> {
     if key.is_empty()
-        || !key.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
     {
         return Err(ApiError::bad_request(format!("invalid key: {key}")));
     }
@@ -225,12 +245,23 @@ fn validate_value(key: &str, value: &str) -> Result<(), ApiError> {
         return Err(ApiError::bad_request(format!("{key}: 值不能包含换行")));
     }
     // 数字型键必须是正整数。
-    if key.starts_with("ROVORTEX_") && (key.contains("SECS") || key.contains("DAYS") || key.contains("MINS") || key.ends_with("_LENGTH") || key.ends_with("_LIMIT") || key.ends_with("_FAILURES") || key.ends_with("_CAPACITY")) {
+    if key.starts_with("ROVORTEX_")
+        && (key.contains("SECS")
+            || key.contains("DAYS")
+            || key.contains("MINS")
+            || key.ends_with("_LENGTH")
+            || key.ends_with("_LIMIT")
+            || key.ends_with("_FAILURES")
+            || key.ends_with("_CAPACITY"))
+    {
         if value.parse::<u64>().is_err() {
             return Err(ApiError::bad_request(format!("{key}: 需要正整数")));
         }
     }
-    if key == "EMAIL_CHANNEL_CODE" || key == "EMAIL_CHANNEL_PC_LINK" || key == "EMAIL_CHANNEL_APP_LINK" {
+    if key == "EMAIL_CHANNEL_CODE"
+        || key == "EMAIL_CHANNEL_PC_LINK"
+        || key == "EMAIL_CHANNEL_APP_LINK"
+    {
         if value != "0" && value != "1" {
             return Err(ApiError::bad_request(format!("{key}: 只能是 0 或 1")));
         }
@@ -303,14 +334,17 @@ pub async fn restart_container(
     // HOSTNAME 环境变量由 docker 注入 = 本容器 id。
     let self_id = std::env::var("HOSTNAME").unwrap_or_default();
     if self_id.is_empty() {
-        return Err(ApiError::internal("HOSTNAME not set (not in docker?)".into()));
+        return Err(ApiError::internal(
+            "HOSTNAME not set (not in docker?)".into(),
+        ));
     }
     // docker CLI 不在镜像里，直接 HTTP 打 docker.sock（API: POST /containers/{id}/restart）。
     // 阻塞 IO 扔 blocking 线程；Windows 本地构建时走 stub（生产只在 Linux 容器跑）。
     #[cfg(unix)]
-    let restart = tokio::task::spawn_blocking(move || docker_sock_restart("/var/run/docker.sock", &self_id))
-        .await
-        .map_err(|e| ApiError::internal(format!("restart task failed: {e}")))?;
+    let restart =
+        tokio::task::spawn_blocking(move || docker_sock_restart("/var/run/docker.sock", &self_id))
+            .await
+            .map_err(|e| ApiError::internal(format!("restart task failed: {e}")))?;
     #[cfg(not(unix))]
     let restart: Result<(), ApiError> = Err(ApiError::internal(
         "docker.sock restart only works on Linux (server) builds".into(),

@@ -7,9 +7,9 @@
 //!
 //! 页面渲染复用 password_reset.rs 的极简 HTML 风格。
 
+use axum::Json;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::Json;
 use serde::Deserialize;
 use std::net::SocketAddr;
 
@@ -27,7 +27,10 @@ pub async fn request_deletion(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let ip = client_ip(&headers, addr);
-    state.users.request_account_deletion(auth.user_id, &ip).await?;
+    state
+        .users
+        .request_account_deletion(auth.user_id, &ip)
+        .await?;
     Ok(StatusCode::ACCEPTED)
 }
 

@@ -8,7 +8,10 @@ use std::sync::Arc;
 use infra_mail::ResendSender;
 use rovortex_users::{AdminService, DbBrowser, TokenSigner, UserService, UserServiceConfig};
 use sqlx::PgPool;
-use storage_pg::{PgAuditRepository, PgDbBrowser, PgEmailVerificationRepository, PgOauthIdentityRepository, PgRefreshTokenRepository, PgUserRepository};
+use storage_pg::{
+    PgAuditRepository, PgDbBrowser, PgEmailVerificationRepository, PgOauthIdentityRepository,
+    PgRefreshTokenRepository, PgUserRepository,
+};
 
 use crate::rate_limit::InMemoryLoginGuard;
 
@@ -46,15 +49,23 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty()),
             oauth_github: match (
-                std::env::var("OAUTH_GITHUB_CLIENT_ID").ok().filter(|s| !s.is_empty()),
-                std::env::var("OAUTH_GITHUB_CLIENT_SECRET").ok().filter(|s| !s.is_empty()),
+                std::env::var("OAUTH_GITHUB_CLIENT_ID")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+                std::env::var("OAUTH_GITHUB_CLIENT_SECRET")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
             ) {
                 (Some(id), Some(secret)) => Some((id, secret)),
                 _ => None,
             },
             oauth_google: match (
-                std::env::var("OAUTH_GOOGLE_CLIENT_ID").ok().filter(|s| !s.is_empty()),
-                std::env::var("OAUTH_GOOGLE_CLIENT_SECRET").ok().filter(|s| !s.is_empty()),
+                std::env::var("OAUTH_GOOGLE_CLIENT_ID")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+                std::env::var("OAUTH_GOOGLE_CLIENT_SECRET")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
             ) {
                 (Some(id), Some(secret)) => Some((id, secret)),
                 _ => None,
@@ -101,7 +112,8 @@ impl AppState {
         let config = Config::from_env();
         let pool = prepare_pool(&config.dsn).await;
 
-        let repo = Arc::new(PgUserRepository::from_pool(pool.clone()));        let refresh_repo = Arc::new(PgRefreshTokenRepository::from_pool(pool.clone()));
+        let repo = Arc::new(PgUserRepository::from_pool(pool.clone()));
+        let refresh_repo = Arc::new(PgRefreshTokenRepository::from_pool(pool.clone()));
         let email_verif_repo = Arc::new(PgEmailVerificationRepository::from_pool(pool.clone()));
         let audit_repo = Arc::new(PgAuditRepository::from_pool(pool.clone()));
         let identity_repo = Arc::new(PgOauthIdentityRepository::from_pool(pool.clone()));
@@ -117,7 +129,9 @@ impl AppState {
             refresh_repo.clone(),
             email_verif_repo,
             mail,
-            Arc::new(InMemoryLoginGuard::with_config(crate::config::login_guard_config())),
+            Arc::new(InMemoryLoginGuard::with_config(
+                crate::config::login_guard_config(),
+            )),
             audit_repo.clone(),
             identity_repo.clone(),
             config.verify_url_base,
@@ -171,8 +185,18 @@ struct LogMailSender;
 
 #[async_trait::async_trait]
 impl rovortex_users::MailSender for LogMailSender {
-    async fn send(&self, to: &str, subject: &str, html: &str) -> Result<(), rovortex_users::MailError> {
-        tracing::warn!(to, subject, "MAIL NOT SENT (no RESEND_API_KEY); body: {}", html);
+    async fn send(
+        &self,
+        to: &str,
+        subject: &str,
+        html: &str,
+    ) -> Result<(), rovortex_users::MailError> {
+        tracing::warn!(
+            to,
+            subject,
+            "MAIL NOT SENT (no RESEND_API_KEY); body: {}",
+            html
+        );
         Ok(())
     }
 }

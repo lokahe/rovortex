@@ -57,9 +57,7 @@ impl IntoResponse for ApiError {
                     }
                     UserError::InvalidUsername(_)
                     | UserError::InvalidEmail(_)
-                    | UserError::InvalidPassword(_) => {
-                        (StatusCode::BAD_REQUEST, "invalid_request")
-                    }
+                    | UserError::InvalidPassword(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
                     UserError::UserNotFound => (StatusCode::NOT_FOUND, "user_not_found"),
                     UserError::InvalidCredentials | UserError::InvalidRefreshToken => {
                         (StatusCode::UNAUTHORIZED, "invalid_credentials")
@@ -72,12 +70,8 @@ impl IntoResponse for ApiError {
                     }
                     UserError::AccountBanned => (StatusCode::FORBIDDEN, "account_banned"),
                     UserError::AccountDeleted => (StatusCode::FORBIDDEN, "account_deleted"),
-                    UserError::LastLoginMethod => {
-                        (StatusCode::CONFLICT, "last_login_method")
-                    }
-                    UserError::Hashing(_) => {
-                        (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-                    }
+                    UserError::LastLoginMethod => (StatusCode::CONFLICT, "last_login_method"),
+                    UserError::Hashing(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
                 };
                 (status, code, e.to_string())
             }

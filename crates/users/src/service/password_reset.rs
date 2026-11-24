@@ -1,6 +1,9 @@
 //! 找回密码：verified 门 + 码/链接双凭据。
 
-use super::{UserService, token_utils::{generate_refresh_token, hash_refresh_token}};
+use super::{
+    UserService,
+    token_utils::{generate_refresh_token, hash_refresh_token},
+};
 use crate::audit::AuditAction;
 use crate::domain::{UserError, validate_email};
 use crate::email_verification::{NewEmailVerification, VerificationPurpose};
@@ -14,7 +17,11 @@ impl UserService {
     /// 只对有密码的账号发信——纯 OAuth/Magic 用户无需密码重置。
     /// verified 门：未验证邮箱的账号不参与密码重置——否则填错邮箱即可重置接管。
     /// 发信失败不阻断流程（用户可重发），只记录。
-    pub async fn request_password_reset(&self, email: &str, client_ip: &str) -> Result<(), UserError> {
+    pub async fn request_password_reset(
+        &self,
+        email: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
         validate_email(email)?;
         let Some(user) = self.repo.find_by_email(email).await? else {
             return Ok(());
@@ -27,7 +34,8 @@ impl UserService {
             AuditAction::PasswordResetRequested,
             format!("email={email}"),
             client_ip,
-        ).await;
+        )
+        .await;
         let code = Self::generate_signup_code();
         let raw = generate_refresh_token();
         for token in [&code, &raw] {
@@ -78,7 +86,13 @@ impl UserService {
         let new_hash = hash_password(new_password)?;
         self.repo.update_password_hash(user_id, &new_hash).await?;
         self.refresh.revoke_all_for_user(user_id).await?;
-        self.audit(Some(user_id), AuditAction::PasswordChanged, "password_reset", client_ip).await;
+        self.audit(
+            Some(user_id),
+            AuditAction::PasswordChanged,
+            "password_reset",
+            client_ip,
+        )
+        .await;
         Ok(())
     }
 
@@ -109,7 +123,13 @@ impl UserService {
         let new_hash = hash_password(new_password)?;
         self.repo.update_password_hash(user_id, &new_hash).await?;
         self.refresh.revoke_all_for_user(user_id).await?;
-        self.audit(Some(user_id), AuditAction::PasswordChanged, "password_reset_code", client_ip).await;
+        self.audit(
+            Some(user_id),
+            AuditAction::PasswordChanged,
+            "password_reset_code",
+            client_ip,
+        )
+        .await;
         Ok(())
     }
 }
@@ -129,7 +149,8 @@ impl UserService {
         if let Some(block) = email_creds::pc_link_block(channels, link, "重置密码") {
             parts.push(block);
         }
-        if let Some(block) = email_creds::app_link_block(channels, "password-reset", "重置密码") {
+        if let Some(block) = email_creds::app_link_block(channels, "password-reset", "重置密码")
+        {
             parts.push(block);
         }
         if parts.is_empty() {

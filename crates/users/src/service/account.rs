@@ -2,13 +2,15 @@
 
 use uuid::Uuid;
 
-use super::{token_utils::{generate_refresh_token, hash_refresh_token}, DELETED_STATUS};
-use super::UserService;
-use crate::audit::AuditAction;
 use super::ProfilePatch;
+use super::UserService;
+use super::{
+    DELETED_STATUS,
+    token_utils::{generate_refresh_token, hash_refresh_token},
+};
+use crate::audit::AuditAction;
 use crate::domain::{User, UserError, validate_email, validate_username};
 use crate::email_verification::{NewEmailVerification, VerificationPurpose};
-
 
 impl UserService {
     /// 修改用户名：校验格式 → 唯一性（大小写不敏感，唯一索引兜底并发）→ 更新。
@@ -37,7 +39,8 @@ impl UserService {
             AuditAction::UsernameChanged,
             format!("old={} new={new_username}", user.username),
             client_ip,
-        ).await;
+        )
+        .await;
         Ok(())
     }
 
@@ -49,9 +52,18 @@ impl UserService {
         client_ip: &str,
     ) -> Result<User, UserError> {
         validate_profile_patch(&patch)?;
-        self.repo.find_by_id(user_id).await?.ok_or(UserError::UserNotFound)?;
+        self.repo
+            .find_by_id(user_id)
+            .await?
+            .ok_or(UserError::UserNotFound)?;
         self.repo.update_profile(user_id, &patch).await?;
-        self.audit(Some(user_id), AuditAction::ProfileUpdated, "profile", client_ip).await;
+        self.audit(
+            Some(user_id),
+            AuditAction::ProfileUpdated,
+            "profile",
+            client_ip,
+        )
+        .await;
         self.repo
             .find_by_id(user_id)
             .await?
@@ -75,7 +87,8 @@ impl UserService {
             AuditAction::AccountDeletionRequested,
             format!("email={}", user.email),
             client_ip,
-        ).await;
+        )
+        .await;
         let raw = generate_refresh_token();
         self.email_verifications
             .insert(NewEmailVerification {
@@ -92,7 +105,8 @@ impl UserService {
             "{}/api/auth/account/confirm-deletion?token={}",
             self.verify_url_base, raw
         );
-        let html = account_deletion_email_html(&user.username, &link, self.config.deletion_grace_days);
+        let html =
+            account_deletion_email_html(&user.username, &link, self.config.deletion_grace_days);
         if let Err(e) = self
             .mail
             .send(&user.email, "Rovortex 账号注销确认", &html)
@@ -125,7 +139,13 @@ impl UserService {
         };
         self.repo.soft_delete(user_id).await?;
         self.refresh.revoke_all_for_user(user_id).await?;
-        self.audit(Some(user_id), AuditAction::AccountDeleted, format!("email={email}"), client_ip).await;
+        self.audit(
+            Some(user_id),
+            AuditAction::AccountDeleted,
+            format!("email={email}"),
+            client_ip,
+        )
+        .await;
         Ok(())
     }
 
@@ -145,7 +165,9 @@ impl UserService {
             return Ok(());
         }
         if let Some(deleted_at) = user.deleted_at {
-            if chrono::Utc::now() - deleted_at > chrono::Duration::days(self.config.deletion_grace_days) {
+            if chrono::Utc::now() - deleted_at
+                > chrono::Duration::days(self.config.deletion_grace_days)
+            {
                 return Ok(());
             }
         }
@@ -155,7 +177,8 @@ impl UserService {
             AuditAction::AccountRecoveryRequested,
             format!("email={email}"),
             client_ip,
-        ).await;
+        )
+        .await;
         let raw = generate_refresh_token();
         self.email_verifications
             .insert(NewEmailVerification {
@@ -172,7 +195,12 @@ impl UserService {
             "{}/api/auth/account/confirm-recovery?token={}",
             self.verify_url_base, raw
         );
-        let html = account_recovery_email_html(&user.username, &link, user.deleted_at, self.config.deletion_grace_days);
+        let html = account_recovery_email_html(
+            &user.username,
+            &link,
+            user.deleted_at,
+            self.config.deletion_grace_days,
+        );
         if let Err(e) = self.mail.send(email, "Rovortex 账号恢复", &html).await {
             tracing::warn!(email, error = %e, "failed to send account recovery mail");
         }
@@ -207,12 +235,20 @@ impl UserService {
             return Err(UserError::InvalidRefreshToken);
         }
         if let Some(deleted_at) = user.deleted_at {
-            if chrono::Utc::now() - deleted_at > chrono::Duration::days(self.config.deletion_grace_days) {
+            if chrono::Utc::now() - deleted_at
+                > chrono::Duration::days(self.config.deletion_grace_days)
+            {
                 return Err(UserError::InvalidRefreshToken);
             }
         }
         self.repo.restore(user_id).await?;
-        self.audit(Some(user_id), AuditAction::AccountRestored, format!("email={email}"), client_ip).await;
+        self.audit(
+            Some(user_id),
+            AuditAction::AccountRestored,
+            format!("email={email}"),
+            client_ip,
+        )
+        .await;
         Ok(())
     }
 
@@ -232,7 +268,8 @@ impl UserService {
             AuditAction::SessionRevoked,
             format!("session={session_id}"),
             client_ip,
-        ).await;
+        )
+        .await;
         Ok(())
     }
 }
@@ -299,7 +336,11 @@ fn account_recovery_email_html(
     grace_days: i64,
 ) -> String {
     let deadline = deleted_at
-        .map(|d| (d + chrono::Duration::days(grace_days)).format("%Y-%m-%d %H:%M UTC").to_string())
+        .map(|d| {
+            (d + chrono::Duration::days(grace_days))
+                .format("%Y-%m-%d %H:%M UTC")
+                .to_string()
+        })
         .unwrap_or_else(|| "未知".into());
     format!(
         r#"<div style="font-family:sans-serif;max-width:480px;margin:0 auto">

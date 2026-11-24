@@ -3,10 +3,10 @@
 use axum::Json;
 use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
-use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
 use rovortex_users::User;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -68,7 +68,13 @@ pub async fn register(
     let ip = client_ip(&headers, addr);
     let session = state
         .users
-        .register(req.username.as_deref(), &req.email, &req.password, &ip, &session_context(&headers, addr))
+        .register(
+            req.username.as_deref(),
+            &req.email,
+            &req.password,
+            &ip,
+            &session_context(&headers, addr),
+        )
         .await?;
     let token = state.tokens.sign(session.user.id)?;
     Ok((
@@ -143,11 +149,17 @@ fn describe_ua(ua: &str) -> String {
     } else if lower.contains("opr/") || lower.contains("opera") {
         "Opera".into()
     } else if lower.contains("chrome/") && !lower.contains("chromium") {
-        version_of(&lower, "chrome/").map(|v| format!("Chrome {v}")).unwrap_or_else(|| "Chrome".into())
+        version_of(&lower, "chrome/")
+            .map(|v| format!("Chrome {v}"))
+            .unwrap_or_else(|| "Chrome".into())
     } else if lower.contains("firefox/") {
-        version_of(&lower, "firefox/").map(|v| format!("Firefox {v}")).unwrap_or_else(|| "Firefox".into())
+        version_of(&lower, "firefox/")
+            .map(|v| format!("Firefox {v}"))
+            .unwrap_or_else(|| "Firefox".into())
     } else if lower.contains("okhttp") {
-        version_of(&lower, "okhttp/").map(|v| format!("okhttp {v}")).unwrap_or_else(|| "Android app".into())
+        version_of(&lower, "okhttp/")
+            .map(|v| format!("okhttp {v}"))
+            .unwrap_or_else(|| "Android app".into())
     } else if lower.contains("safari") && lower.contains("mobile") {
         "Mobile Safari".into()
     } else if lower.contains("safari") {
@@ -176,20 +188,16 @@ fn describe_ua(ua: &str) -> String {
 fn version_of(ua: &str, marker: &str) -> Option<String> {
     let idx = ua.find(marker)? + marker.len();
     let rest = &ua[idx..];
-    let major: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    if major.is_empty() {
-        None
-    } else {
-        Some(major)
-    }
+    let major: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if major.is_empty() { None } else { Some(major) }
 }
 
 /// 提取会话签发上下文：device_label 优先取客户端自报（X-Device-Name，≤64 字符），
 /// 否则用 UA 解析结果；ip 只存粗粒度段。
-pub fn session_context(headers: &axum::http::HeaderMap, addr: SocketAddr) -> rovortex_users::SessionContext {
+pub fn session_context(
+    headers: &axum::http::HeaderMap,
+    addr: SocketAddr,
+) -> rovortex_users::SessionContext {
     let ua_raw = headers
         .get("user-agent")
         .and_then(|v| v.to_str().ok())

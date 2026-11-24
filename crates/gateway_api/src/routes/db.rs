@@ -36,7 +36,10 @@ pub async fn list_tables(
         .await
         .map_err(db_error)?
         .into_iter()
-        .map(|t| TableInfo { name: t.name, rows: t.rows })
+        .map(|t| TableInfo {
+            name: t.name,
+            rows: t.rows,
+        })
         .collect();
     Ok(Json(tables))
 }
@@ -116,7 +119,10 @@ pub async fn browse(
         table: table.to_string(),
         columns: columns
             .into_iter()
-            .map(|c| ColumnInfo { name: c.name, data_type: c.data_type })
+            .map(|c| ColumnInfo {
+                name: c.name,
+                data_type: c.data_type,
+            })
             .collect(),
         rows: raw_rows,
         total,
@@ -187,7 +193,14 @@ pub async fn insert_row(
         &admin,
         AuditAction::AdminDbInsert,
         table,
-        format!("id={id} cols={}", columns.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(",")),
+        format!(
+            "id={id} cols={}",
+            columns
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
     )
     .await;
     Ok(Json(serde_json::json!({ "id": id })))
@@ -220,7 +233,14 @@ pub async fn update_row(
         &admin,
         AuditAction::AdminDbUpdate,
         table,
-        format!("id={id} cols={}", columns.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(",")),
+        format!(
+            "id={id} cols={}",
+            columns
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
     )
     .await;
     Ok(Json(serde_json::json!({ "updated": affected })))
@@ -241,6 +261,13 @@ pub async fn delete_row(
     if affected == 0 {
         return Err(ApiError::not_found());
     }
-    audit_write(&state, &admin, AuditAction::AdminDbDelete, table, format!("id={id}")).await;
+    audit_write(
+        &state,
+        &admin,
+        AuditAction::AdminDbDelete,
+        table,
+        format!("id={id}"),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "deleted": affected })))
 }

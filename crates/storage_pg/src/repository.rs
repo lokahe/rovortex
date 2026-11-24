@@ -208,11 +208,7 @@ impl UserRepository for PgUserRepository {
         Ok(())
     }
 
-    async fn update_profile(
-        &self,
-        id: Uuid,
-        patch: &ProfilePatch,
-    ) -> Result<(), UserError> {
+    async fn update_profile(&self, id: Uuid, patch: &ProfilePatch) -> Result<(), UserError> {
         sqlx::query!(
             r#"UPDATE users SET
                  display_name = CASE WHEN $2::bool THEN $3 ELSE display_name END,
@@ -238,11 +234,13 @@ impl UserRepository for PgUserRepository {
     }
 
     async fn is_admin(&self, id: Uuid) -> Result<bool, UserError> {
-        let row =
-            sqlx::query!(r#"SELECT is_admin AS "is_admin: bool" FROM users WHERE id = $1"#, id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
+        let row = sqlx::query!(
+            r#"SELECT is_admin AS "is_admin: bool" FROM users WHERE id = $1"#,
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
         Ok(row.is_some_and(|r| r.is_admin))
     }
 
@@ -272,15 +270,14 @@ impl UserRepository for PgUserRepository {
 
     async fn count_users(&self, q: Option<&str>) -> Result<i64, UserError> {
         let pattern = q.map(|s| format!("%{}%", s.to_lowercase()));
-        let row =
-            sqlx::query!(
-                r#"SELECT count(*) AS "count!: i64" FROM users
+        let row = sqlx::query!(
+            r#"SELECT count(*) AS "count!: i64" FROM users
                    WHERE ($1::text IS NULL OR email_key LIKE $1 OR username_key LIKE $1)"#,
-                pattern,
-            )
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
+            pattern,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
         Ok(row.count)
     }
 

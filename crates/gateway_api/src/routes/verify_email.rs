@@ -1,11 +1,11 @@
 //! 邮箱验证接口：请求验证信 / 点击确认链接。
 
+use axum::Json;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
-use std::net::SocketAddr;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
+use std::net::SocketAddr;
 
 use crate::error::ApiError;
 use crate::routes::users::client_ip;
@@ -44,8 +44,15 @@ pub async fn confirm(
     Query(params): Query<ConfirmParams>,
 ) -> Result<Response, Response> {
     let ip = client_ip(&headers, addr);
-    match state.users.confirm_email_verification(&params.token, &ip).await {
-        Ok(()) => Ok(result_page("验证成功", "你的邮箱已完成验证，可以关闭此页面。")),
+    match state
+        .users
+        .confirm_email_verification(&params.token, &ip)
+        .await
+    {
+        Ok(()) => Ok(result_page(
+            "验证成功",
+            "你的邮箱已完成验证，可以关闭此页面。",
+        )),
         Err(_) => Err(result_page(
             "链接无效",
             "验证链接无效或已过期，请重新请求验证邮件。",

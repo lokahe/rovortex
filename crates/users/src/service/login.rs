@@ -7,7 +7,6 @@ use crate::audit::AuditAction;
 use crate::domain::UserError;
 use crate::password::{hash_password, verify_password};
 
-
 impl UserService {
     /// 登录：限流检查 → 查用户 → 验密码 → 签会话。
     ///
@@ -30,17 +29,30 @@ impl UserService {
                     AuditAction::LoginSuccess,
                     format!("login={login}"),
                     client_ip,
-                ).await;
+                )
+                .await;
                 self.login_guard.record_success(guard_key).await
             }
             Err(UserError::InvalidCredentials) => {
-                self.audit(None, AuditAction::LoginFailure, format!("login={login}"), client_ip).await;
+                self.audit(
+                    None,
+                    AuditAction::LoginFailure,
+                    format!("login={login}"),
+                    client_ip,
+                )
+                .await;
                 self.login_guard.record_failure(guard_key).await
             }
             // 用户不存在也计入失败（防枚举语义下这同样是 InvalidCredentials，
             // 但防御性处理：其他错误不计入）
             Err(UserError::UserNotFound) => {
-                self.audit(None, AuditAction::LoginFailure, format!("login={login}"), client_ip).await;
+                self.audit(
+                    None,
+                    AuditAction::LoginFailure,
+                    format!("login={login}"),
+                    client_ip,
+                )
+                .await;
                 self.login_guard.record_failure(guard_key).await
             }
             Err(_) => {}
@@ -48,7 +60,12 @@ impl UserService {
         result
     }
 
-    async fn login_inner(&self, login: &str, password: &str, ctx: &SessionContext) -> Result<Session, UserError> {
+    async fn login_inner(
+        &self,
+        login: &str,
+        password: &str,
+        ctx: &SessionContext,
+    ) -> Result<Session, UserError> {
         let user = self
             .repo
             .find_by_login(login)
@@ -66,16 +83,32 @@ impl UserService {
     }
 
     /// 用 refresh token 换取新会话（轮换：旧 token 立即吊销）。
-    pub async fn refresh(&self, raw_token: &str, client_ip: &str, ctx: &SessionContext) -> Result<Session, UserError> {
+    pub async fn refresh(
+        &self,
+        raw_token: &str,
+        client_ip: &str,
+        ctx: &SessionContext,
+    ) -> Result<Session, UserError> {
         let token_hash = hash_refresh_token(raw_token);
         let result = self.refresh_inner(&token_hash, client_ip, ctx).await;
         if result.is_err() {
-            self.audit(None, AuditAction::RefreshFailure, "invalid refresh token", client_ip).await;
+            self.audit(
+                None,
+                AuditAction::RefreshFailure,
+                "invalid refresh token",
+                client_ip,
+            )
+            .await;
         }
         result
     }
 
-    async fn refresh_inner(&self, token_hash: &str, client_ip: &str, ctx: &SessionContext) -> Result<Session, UserError> {
+    async fn refresh_inner(
+        &self,
+        token_hash: &str,
+        client_ip: &str,
+        ctx: &SessionContext,
+    ) -> Result<Session, UserError> {
         let (user_id, _) = self
             .refresh
             .find_active_by_hash(token_hash)
@@ -88,7 +121,8 @@ impl UserService {
             .find_by_id(user_id)
             .await?
             .ok_or(UserError::UserNotFound)?;
-        self.audit(Some(user.id), AuditAction::RefreshSuccess, "", client_ip).await;
+        self.audit(Some(user.id), AuditAction::RefreshSuccess, "", client_ip)
+            .await;
         self.issue_session(user, ctx).await
     }
 
@@ -125,15 +159,20 @@ impl UserService {
             return Err(UserError::InvalidCredentials);
         };
         if !verify_password(old_password, old_hash) {
-            self.audit(Some(user_id), AuditAction::LoginFailure, "change_password: old password mismatch", client_ip).await;
+            self.audit(
+                Some(user_id),
+                AuditAction::LoginFailure,
+                "change_password: old password mismatch",
+                client_ip,
+            )
+            .await;
             return Err(UserError::InvalidCredentials);
         }
         let new_hash = hash_password(new_password)?;
-        self.repo
-            .update_password_hash(user_id, &new_hash)
-            .await?;
+        self.repo.update_password_hash(user_id, &new_hash).await?;
         self.refresh.revoke_all_for_user(user_id).await?;
-        self.audit(Some(user_id), AuditAction::PasswordChanged, "", client_ip).await;
+        self.audit(Some(user_id), AuditAction::PasswordChanged, "", client_ip)
+            .await;
         Ok(())
     }
 }

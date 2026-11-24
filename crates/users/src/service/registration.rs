@@ -2,12 +2,14 @@
 
 use uuid::Uuid;
 
-use super::{Session, SessionContext, UserService, token_utils::{generate_refresh_token, hash_refresh_token}};
+use super::{
+    Session, SessionContext, UserService,
+    token_utils::{generate_refresh_token, hash_refresh_token},
+};
 use crate::audit::AuditAction;
 use crate::domain::{NewUser, UserError, validate_email, validate_username};
 use crate::email_verification::{NewEmailVerification, VerificationPurpose};
 use crate::password::hash_password;
-
 
 impl UserService {
     /// 注册：校验 → 查重 → Argon2id 哈希 → 持久化 → 签发会话。
@@ -54,7 +56,8 @@ impl UserService {
             AuditAction::Register,
             format!("username={}", user.username),
             client_ip,
-        ).await;
+        )
+        .await;
         self.issue_session(user, ctx).await
     }
 
@@ -68,10 +71,16 @@ impl UserService {
         if self.repo.find_by_email(email).await?.is_some() {
             return Ok(()); // 已注册：防枚举，不发信
         }
-        self.audit(None, AuditAction::SignupRequested, format!("email={email}"), client_ip).await;
+        self.audit(
+            None,
+            AuditAction::SignupRequested,
+            format!("email={email}"),
+            client_ip,
+        )
+        .await;
 
-        let expires_at = chrono::Utc::now()
-            + chrono::Duration::minutes(self.config.email_verification_ttl_mins);
+        let expires_at =
+            chrono::Utc::now() + chrono::Duration::minutes(self.config.email_verification_ttl_mins);
         // 通道一：6 位数字验证码（App 内手动回填）
         let code = Self::generate_signup_code();
         // 通道二：确认链接（PC 浏览器完成注册）
@@ -145,7 +154,7 @@ impl UserService {
 
     /// 建号（邮箱已验证语义）：密码/用户名校验 + 唯一性检查 + email_verified=true。
     /// 并发撞车由仓储层唯一索引兜底。
-    async fn create_verified_user(
+    pub(super) async fn create_verified_user(
         &self,
         email: &str,
         password: &str,
@@ -183,7 +192,8 @@ impl UserService {
             AuditAction::Register,
             format!("username={} verified=true", user.username),
             client_ip,
-        ).await;
+        )
+        .await;
         self.issue_session(user, ctx).await
     }
 
@@ -208,7 +218,8 @@ impl UserService {
                 block = block
             ));
         }
-        if let Some(block) = email_creds::pc_link_block(channels, link, "在浏览器中完成注册") {
+        if let Some(block) = email_creds::pc_link_block(channels, link, "在浏览器中完成注册")
+        {
             parts.push(block);
         }
         if let Some(block) = email_creds::app_link_block(channels, "signup", "完成注册") {

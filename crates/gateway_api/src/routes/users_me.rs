@@ -1,12 +1,12 @@
 //! 受保护的用户接口：要求有效的 Bearer token。
 
 use axum::Json;
-use axum::http::StatusCode;
 use axum::extract::{ConnectInfo, Path, State};
-use std::net::SocketAddr;
+use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use rovortex_users::{ProfilePatch, UserError};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -176,10 +176,7 @@ pub async fn update_profile(
         bio: req.bio,
         website_url: req.website_url,
     };
-    let user = state
-        .users
-        .update_profile(auth.user_id, patch, &ip)
-        .await?;
+    let user = state.users.update_profile(auth.user_id, patch, &ip).await?;
     Ok(Json(me_response(user)))
 }
 

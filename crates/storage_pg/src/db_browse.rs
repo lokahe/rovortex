@@ -5,12 +5,12 @@
 //! 搜索时 $1=q/$2=limit/$3=offset，否则 $1=limit/$2=offset。
 
 use serde_json::Value;
-use sqlx::postgres::PgRow;
 use sqlx::Row;
+use sqlx::postgres::PgRow;
 use uuid::Uuid;
 
 use rovortex_users::db_browse::{
-    BrowseParams, ColumnInfo, DbBrowseError, DbBrowser, TableSummary, BROWSABLE_TABLES,
+    BROWSABLE_TABLES, BrowseParams, ColumnInfo, DbBrowseError, DbBrowser, TableSummary,
 };
 
 pub struct PgDbBrowser {
@@ -163,7 +163,9 @@ impl DbBrowser for PgDbBrowser {
         for (_, v) in columns {
             q = q.bind(value_as_text(v));
         }
-        q.fetch_one(&self.pool).await.map_err(DbBrowseError::database)
+        q.fetch_one(&self.pool)
+            .await
+            .map_err(DbBrowseError::database)
     }
 
     async fn update_row(

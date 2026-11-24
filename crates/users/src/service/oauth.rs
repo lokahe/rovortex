@@ -8,7 +8,6 @@ use crate::domain::{NewUser, UserError, validate_email, validate_username};
 use crate::oauth_identity::{ExternalIdentity, ExternalProfile, NewExternalIdentity};
 use crate::password::hash_password;
 
-
 impl UserService {
     /// 外部身份登录（OAuth 回调 / Magic Link 确认后的共同入口）。
     ///
@@ -26,7 +25,11 @@ impl UserService {
         ctx: &SessionContext,
     ) -> Result<Session, UserError> {
         // 1. 已绑定：直接登录（顺带刷新平台原始资料缓存）
-        if let Some(identity) = self.identities.find_by_external(provider, provider_uid).await? {
+        if let Some(identity) = self
+            .identities
+            .find_by_external(provider, provider_uid)
+            .await?
+        {
             let user = self
                 .repo
                 .find_by_id(identity.user_id)
@@ -45,7 +48,8 @@ impl UserService {
                 AuditAction::LoginSuccess,
                 format!("provider={provider}"),
                 client_ip,
-            ).await;
+            )
+            .await;
             let user = self
                 .repo
                 .find_by_id(user.id)
@@ -56,7 +60,9 @@ impl UserService {
 
         // 2/3. 未绑定：需要 email 建账号或合并
         let email = email.ok_or_else(|| {
-            UserError::Hashing(format!("provider {provider} reported no email; cannot bind"))
+            UserError::Hashing(format!(
+                "provider {provider} reported no email; cannot bind"
+            ))
         })?;
         validate_email(email)?;
 
@@ -107,7 +113,8 @@ impl UserService {
                     AuditAction::Register,
                     format!("username={}", user.username),
                     client_ip,
-                ).await;
+                )
+                .await;
                 self.repo
                     .find_by_id(user.id)
                     .await?
@@ -120,7 +127,8 @@ impl UserService {
             AuditAction::LoginSuccess,
             format!("provider={provider}"),
             client_ip,
-        ).await;
+        )
+        .await;
         self.issue_session(user, ctx).await
     }
 
@@ -140,10 +148,26 @@ impl UserService {
         };
         // 空缺才回填：users 字段为 None 时写入平台值；非空即视为用户编辑过，不动
         let patch = ProfilePatch {
-            display_name: if user.display_name.is_none() { Some(p.display_name.clone()) } else { None },
-            avatar_url: if user.avatar_url.is_none() { Some(p.avatar_url.clone()) } else { None },
-            bio: if user.bio.is_none() { Some(p.bio.clone()) } else { None },
-            website_url: if user.website_url.is_none() { Some(p.website_url.clone()) } else { None },
+            display_name: if user.display_name.is_none() {
+                Some(p.display_name.clone())
+            } else {
+                None
+            },
+            avatar_url: if user.avatar_url.is_none() {
+                Some(p.avatar_url.clone())
+            } else {
+                None
+            },
+            bio: if user.bio.is_none() {
+                Some(p.bio.clone())
+            } else {
+                None
+            },
+            website_url: if user.website_url.is_none() {
+                Some(p.website_url.clone())
+            } else {
+                None
+            },
         };
         if patch.display_name.is_some()
             || patch.avatar_url.is_some()
@@ -224,7 +248,13 @@ impl UserService {
         }
         let new_hash = hash_password(new_password)?;
         self.repo.update_password_hash(user_id, &new_hash).await?;
-        self.audit(Some(user_id), AuditAction::PasswordChanged, "set_password", client_ip).await;
+        self.audit(
+            Some(user_id),
+            AuditAction::PasswordChanged,
+            "set_password",
+            client_ip,
+        )
+        .await;
         Ok(())
     }
 
@@ -235,8 +265,16 @@ impl UserService {
 
     /// 解绑外部身份。守门：解绑后必须仍剩至少一种登录方式
     /// （密码已设或还有其他身份），否则拒绝——防解绑成无法登录的死号。
-    pub async fn unbind_identity(&self, user_id: Uuid, provider: &str, client_ip: &str) -> Result<(), UserError> {
-        self.repo.find_by_id(user_id).await?.ok_or(UserError::UserNotFound)?;
+    pub async fn unbind_identity(
+        &self,
+        user_id: Uuid,
+        provider: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
+        self.repo
+            .find_by_id(user_id)
+            .await?
+            .ok_or(UserError::UserNotFound)?;
         let bound = self.identities.list_for_user(user_id).await?;
         if !bound.iter().any(|i| i.provider == provider) {
             return Err(UserError::UserNotFound);
@@ -256,7 +294,8 @@ impl UserService {
             AuditAction::IdentityUnlinked,
             format!("provider={provider}"),
             client_ip,
-        ).await;
+        )
+        .await;
         Ok(())
     }
 

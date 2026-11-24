@@ -29,21 +29,16 @@ async fn main() {
     // （admin 日志页数据源；buffer 要先于 subscriber 存在，故先构造再装）。
     let log_buffer = crate::log_buffer::LogBuffer::new(crate::config::log_buffer_capacity());
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer().with_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-            ),
-        )
+        .with(tracing_subscriber::fmt::layer().with_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        ))
         .with(crate::log_layer::BufferLayer::new(log_buffer.clone()))
         .init();
     // 组合根：在这里注入具体仓储实现（当前为 PostgreSQL，含启动时迁移）。
     let state = AppState::with_log_buffer(log_buffer.clone()).await;
-    let app = routes::router(state.clone())
-        .layer(cors_layer())
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            observe::request_id_and_log,
-        ));
+    let app = routes::router(state.clone()).layer(cors_layer()).layer(
+        axum::middleware::from_fn_with_state(state.clone(), observe::request_id_and_log),
+    );
 
     let port: u16 = std::env::var("ROVORTEX_PORT")
         .ok()

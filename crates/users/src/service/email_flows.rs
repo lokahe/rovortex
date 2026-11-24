@@ -2,18 +2,24 @@
 
 use uuid::Uuid;
 
-use super::{Session, SessionContext, UserService, token_utils::{generate_refresh_token, hash_refresh_token}};
+use super::{
+    Session, SessionContext, UserService,
+    token_utils::{generate_refresh_token, hash_refresh_token},
+};
 use crate::audit::AuditAction;
 use crate::domain::{UserError, validate_email};
 use crate::email_verification::{NewEmailVerification, VerificationPurpose};
-
 
 impl UserService {
     /// 请求注册邮箱验证：给指定邮箱发确认信。
     ///
     /// 防枚举：无论邮箱是否已注册，都返回 Ok（不泄露注册状态）。
     /// 发信失败不阻断流程（用户可重发），只记录。
-    pub async fn request_email_verification(&self, email: &str, client_ip: &str) -> Result<(), UserError> {
+    pub async fn request_email_verification(
+        &self,
+        email: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
         validate_email(email)?;
         if let Some(user) = self.repo.find_by_email(email).await? {
             if user.email_verified {
@@ -24,7 +30,8 @@ impl UserService {
                 AuditAction::EmailVerificationRequested,
                 format!("email={email}"),
                 client_ip,
-            ).await;
+            )
+            .await;
             let raw = generate_refresh_token();
             self.email_verifications
                 .insert(NewEmailVerification {
@@ -50,7 +57,11 @@ impl UserService {
     }
 
     /// 确认注册验证：校验 token → 标记邮箱已验证。
-    pub async fn confirm_email_verification(&self, raw_token: &str, client_ip: &str) -> Result<(), UserError> {
+    pub async fn confirm_email_verification(
+        &self,
+        raw_token: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
         let token_hash = hash_refresh_token(raw_token);
         let (email, purpose, user_id) = self
             .email_verifications
@@ -67,7 +78,13 @@ impl UserService {
             .ok_or(UserError::UserNotFound)?;
         // user_id 在 signup 流程为 None，以邮箱反查为准。
         let _ = user_id;
-        self.audit(Some(user.id), AuditAction::EmailVerified, format!("email={email}"), client_ip).await;
+        self.audit(
+            Some(user.id),
+            AuditAction::EmailVerified,
+            format!("email={email}"),
+            client_ip,
+        )
+        .await;
         self.repo.mark_email_verified(user.id).await
     }
 
@@ -97,7 +114,8 @@ impl UserService {
             AuditAction::EmailChangeRequested,
             format!("old={} new={new_email}", user.email),
             client_ip,
-        ).await;
+        )
+        .await;
 
         let raw = generate_refresh_token();
         self.email_verifications
@@ -116,14 +134,22 @@ impl UserService {
             self.verify_url_base, raw
         );
         let html = email_change_email_html(&user.username, new_email, &link);
-        if let Err(e) = self.mail.send(new_email, "Rovortex 邮箱变更确认", &html).await {
+        if let Err(e) = self
+            .mail
+            .send(new_email, "Rovortex 邮箱变更确认", &html)
+            .await
+        {
             tracing::warn!(new_email, error = %e, "failed to send email change mail");
         }
         Ok(())
     }
 
     /// 确认改邮箱：校验 token → 更新邮箱（同时置 email_verified）。
-    pub async fn confirm_email_change(&self, raw_token: &str, client_ip: &str) -> Result<(), UserError> {
+    pub async fn confirm_email_change(
+        &self,
+        raw_token: &str,
+        client_ip: &str,
+    ) -> Result<(), UserError> {
         let token_hash = hash_refresh_token(raw_token);
         let (email, purpose, user_id) = self
             .email_verifications
@@ -136,7 +162,13 @@ impl UserService {
         if purpose != VerificationPurpose::EmailChange {
             return Err(UserError::InvalidRefreshToken);
         }
-        self.audit(Some(user_id), AuditAction::EmailChanged, format!("new={email}"), client_ip).await;
+        self.audit(
+            Some(user_id),
+            AuditAction::EmailChanged,
+            format!("new={email}"),
+            client_ip,
+        )
+        .await;
         self.repo.update_email(user_id, &email).await
     }
 
@@ -153,7 +185,8 @@ impl UserService {
                 AuditAction::MagicLinkRequested,
                 format!("email={email}"),
                 client_ip,
-            ).await;
+            )
+            .await;
         }
 
         let raw = generate_refresh_token();

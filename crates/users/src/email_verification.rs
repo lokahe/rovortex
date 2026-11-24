@@ -21,6 +21,8 @@ pub enum VerificationPurpose {
     AccountDeletion,
     /// 注销恢复（冷静期内）：token 授权恢复账号并取回原邮箱。
     AccountRecovery,
+    /// 统一入口：邮箱+密码一框登录/注册，码即登录凭据（已注册收码静默设密，未注册建号）。
+    EmailEntry,
 }
 
 impl VerificationPurpose {
@@ -32,6 +34,7 @@ impl VerificationPurpose {
             VerificationPurpose::PasswordReset => "password_reset",
             VerificationPurpose::AccountDeletion => "account_deletion",
             VerificationPurpose::AccountRecovery => "account_recovery",
+            VerificationPurpose::EmailEntry => "email_entry",
         }
     }
 }

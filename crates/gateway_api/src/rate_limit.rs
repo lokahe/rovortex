@@ -35,8 +35,7 @@ impl InMemoryLoginGuard {
         if entries.len() % 256 == 0 {
             let now = Instant::now();
             entries.retain(|_, e| {
-                e.failures < self.max_failures
-                    || self.locked_until(e).is_some_and(|t| t > now)
+                e.failures < self.max_failures || self.locked_until(e).is_some_and(|t| t > now)
             });
         }
     }
@@ -111,7 +110,10 @@ mod tests {
         for _ in 0..3 {
             g.record_failure("k").await;
         }
-        assert!(matches!(g.check("k").await, Err(UserError::TooManyAttempts)));
+        assert!(matches!(
+            g.check("k").await,
+            Err(UserError::TooManyAttempts)
+        ));
         // 其他 key 不受影响
         assert!(g.check("other").await.is_ok());
         // 成功后清零
@@ -127,7 +129,10 @@ mod tests {
         }
         assert!(g.check("k").await.is_ok());
         g.record_failure("k").await;
-        assert!(matches!(g.check("k").await, Err(UserError::TooManyAttempts)));
+        assert!(matches!(
+            g.check("k").await,
+            Err(UserError::TooManyAttempts)
+        ));
     }
 
     #[tokio::test]
@@ -146,13 +151,19 @@ mod tests {
         });
         g.record_failure("k").await;
         g.record_failure("k").await;
-        assert!(matches!(g.check("k").await, Err(UserError::TooManyAttempts)));
+        assert!(matches!(
+            g.check("k").await,
+            Err(UserError::TooManyAttempts)
+        ));
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(g.check("k").await.is_ok());
         // 窗口过期后计数清零：1 次失败（< 2）不再立即锁，第 2 次才锁。
         g.record_failure("k").await;
         assert!(g.check("k").await.is_ok());
         g.record_failure("k").await;
-        assert!(matches!(g.check("k").await, Err(UserError::TooManyAttempts)));
+        assert!(matches!(
+            g.check("k").await,
+            Err(UserError::TooManyAttempts)
+        ));
     }
 }

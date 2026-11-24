@@ -63,7 +63,35 @@ impl Default for EmailChannels {
 impl EmailChannels {
     /// deep link 可渲染 = 开关开且 scheme 非空。
     pub fn app_link_ready(&self) -> bool {
-        self.app_link && self.app_link_scheme.as_deref().is_some_and(|s| !s.is_empty())
+        self.app_link
+            && self
+                .app_link_scheme
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+    }
+
+    /// 按客户端平台取通道集（email-entry 用）：
+    /// - app（Android）：码 + dp，不发 PC 链接（手机点 PC 链接体验割裂）
+    /// - web/pc/未知：码 + PC 链接（dp 无意义——浏览器打开深链没接管方）
+    /// 开关组合仍受全局 env 约束：全局关掉的通道任何平台都不发。
+    pub fn for_platform(&self, platform: &str) -> EmailChannels {
+        let is_app =
+            platform.eq_ignore_ascii_case("app") || platform.eq_ignore_ascii_case("android");
+        if is_app {
+            EmailChannels {
+                code: self.code,
+                pc_link: false,
+                app_link: self.app_link,
+                app_link_scheme: self.app_link_scheme.clone(),
+            }
+        } else {
+            EmailChannels {
+                code: self.code,
+                pc_link: self.pc_link,
+                app_link: false,
+                app_link_scheme: None,
+            }
+        }
     }
 }
 
@@ -295,7 +323,11 @@ pub(crate) mod email_creds {
     }
 
     /// PC 链接段（按钮 + 纯文本兜底）。
-    pub(super) fn pc_link_block(channels: &EmailChannels, link: &str, label: &str) -> Option<String> {
+    pub(super) fn pc_link_block(
+        channels: &EmailChannels,
+        link: &str,
+        label: &str,
+    ) -> Option<String> {
         channels.pc_link.then(|| format!(
             r#"  <p style="color:#555">也可以在电脑上点击下面的链接{label}：</p>
   <p><a href="{link}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:6px">{label}</a></p>
@@ -306,7 +338,11 @@ pub(crate) mod email_creds {
     }
 
     /// App deep link 段（开关开且 scheme 非空时 Some）。
-    pub(super) fn app_link_block(channels: &EmailChannels, path: &str, label: &str) -> Option<String> {
+    pub(super) fn app_link_block(
+        channels: &EmailChannels,
+        path: &str,
+        label: &str,
+    ) -> Option<String> {
         let scheme = channels.app_link_scheme.as_deref().unwrap_or("");
         channels.app_link_ready().then(|| format!(
             r#"  <p style="color:#555">在手机上点击下面的链接，直接打开应用{label}：</p>
@@ -325,6 +361,7 @@ pub(crate) mod email_creds {
 
 // 按用例域拆分的 impl 块（同 crate 多 impl 合法）。
 mod account;
+mod email_entry;
 mod email_flows;
 mod login;
 mod oauth;
