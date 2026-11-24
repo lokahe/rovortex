@@ -80,10 +80,44 @@ pub fn users_service_config() -> UserServiceConfig {
         password_max_length: env_parse("ROVORTEX_PASSWORD_MAX_LENGTH")
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_PASSWORD_MAX_LENGTH),
+        email_channels: email_channels_config(),
     };
     if cfg.password_min_length > cfg.password_max_length {
         // 上下限配置颠倒时快速失败，避免带病启动。
         panic!("ROVORTEX_PASSWORD_MIN_LENGTH must be <= ROVORTEX_PASSWORD_MAX_LENGTH");
     }
     cfg
+}
+
+/// 验证邮件通道开关：`0`/`1`（其余值视为非法回退默认）。
+/// dp 段额外要求 EMAIL_APP_LINK_SCHEME 非空，否则即使开关=1 也不渲染。
+fn email_channels_config() -> rovortex_users::EmailChannels {
+    use rovortex_users::EmailChannels;
+    let default = EmailChannels::default();
+    let flag = |key: &str, fallback: bool| -> bool {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<u8>().ok())
+            .map(|n| n != 0)
+            .unwrap_or(fallback)
+    };
+    let code = flag("EMAIL_CHANNEL_CODE", default.code);
+    let pc_link = flag("EMAIL_CHANNEL_PC_LINK", default.pc_link);
+    let app_link = flag("EMAIL_CHANNEL_APP_LINK", default.app_link);
+    let app_link_scheme = std::env::var("EMAIL_APP_LINK_SCHEME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    // 全关兜底：邮件不能是空壳，至少保留验证码。
+    let (code, pc_link) = if !code && !pc_link && !app_link {
+        (true, pc_link)
+    } else {
+        (code, pc_link)
+    };
+    EmailChannels {
+        code,
+        pc_link,
+        app_link,
+        app_link_scheme,
+    }
 }
