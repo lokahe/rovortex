@@ -6,6 +6,7 @@ import {
   Modal,
   Space,
   Table,
+  Tabs,
   Tag,
   Tooltip,
   Typography,
@@ -13,7 +14,7 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { CheckOutlined, EditOutlined, ReloadOutlined, SaveOutlined } from '@ant-design/icons'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { adminApi, apiError } from '../api'
 
 interface ConfigEntry {
@@ -22,6 +23,7 @@ interface ConfigEntry {
   secret: boolean
   doc: string
   wired: boolean
+  group: string
 }
 
 interface ConfigResponse {
@@ -29,6 +31,9 @@ interface ConfigResponse {
   available_keys: string[]
   modified_at: string | null
 }
+
+/// 分组展示顺序（与后端 KEY_GROUPS 语义对应）；「其他」固定最后。
+const GROUP_ORDER = ['安全凭据', '邮件', 'OAuth 登录', '会话与账号', '安全与限流', '运行参数', '其他']
 
 export default function SettingsPage() {
   const [data, setData] = useState<ConfigResponse | null>(null)
@@ -56,6 +61,21 @@ export default function SettingsPage() {
   }, [load])
 
   const dirty = Object.keys(editing).filter((k) => editing[k] !== undefined)
+
+  const grouped = useMemo(() => {
+    const map = new Map<string, ConfigEntry[]>()
+    for (const e of data?.entries ?? []) {
+      const list = map.get(e.group) ?? []
+      list.push(e)
+      map.set(e.group, list)
+    }
+    // 「其他」固定最后；其余按 GROUP_ORDER，未知组插在「其他」前。
+    const known = GROUP_ORDER.filter((g) => map.has(g))
+    const unknown = [...map.keys()].filter((g) => !GROUP_ORDER.includes(g))
+    return [...known, ...unknown].map((g) => ({ group: g, entries: map.get(g)! }))
+  }, [data])
+
+  const dirtyIn = (entries: ConfigEntry[]) => entries.filter((e) => editing[e.key] !== undefined).length
 
   const save = async () => {
     if (!data || dirty.length === 0) return
@@ -228,13 +248,30 @@ export default function SettingsPage() {
         style={{ marginBottom: 16 }}
         message="修改写入服务器 .env，点「重启容器生效」后应用。secret 值不回显；编辑 secret 保存时留占位符 = 保留原值。"
       />
-      <Table
-        rowKey="key"
-        loading={loading}
-        dataSource={data?.entries ?? []}
-        columns={columns}
-        pagination={false}
-        size="middle"
+      <Tabs
+        items={grouped.map(({ group, entries }) => ({
+          key: group,
+          label: (
+            <span>
+              {group}
+              {dirtyIn(entries) > 0 && (
+                <Tag color="blue" style={{ marginLeft: 6 }}>
+                  {dirtyIn(entries)}
+                </Tag>
+              )}
+            </span>
+          ),
+          children: (
+            <Table
+              rowKey="key"
+              loading={loading}
+              dataSource={entries}
+              columns={columns}
+              pagination={false}
+              size="middle"
+            />
+          ),
+        }))}
       />
       <Typography.Paragraph type="secondary" style={{ marginTop: 12, fontSize: 12 }}>
         {data?.modified_at

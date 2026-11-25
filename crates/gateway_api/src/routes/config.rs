@@ -78,6 +78,42 @@ pub const KEY_DOCS: &[(&str, &str)] = &[
     ("EMAIL_APP_LINK_SCHEME", "App 深链 scheme（如 rovortex）"),
 ];
 
+/// 配置分组：key → (组名, 组内排序)。前端按此渲染分组 Tabs；
+/// 未列出的键归入「其他」。顺序即展示顺序。
+pub const KEY_GROUPS: &[(&str, &str)] = &[
+    // ── 安全凭据 ──
+    ("ROVORTEX_JWT_SECRET", "安全凭据"),
+    ("RESEND_API_KEY", "安全凭据"),
+    ("OAUTH_GITHUB_CLIENT_SECRET", "安全凭据"),
+    ("OAUTH_GOOGLE_CLIENT_SECRET", "安全凭据"),
+    // ── 邮件 ──
+    ("ROVORTEX_MAIL_FROM", "邮件"),
+    ("ROVORTEX_VERIFY_URL_BASE", "邮件"),
+    ("EMAIL_CHANNEL_CODE", "邮件"),
+    ("EMAIL_CHANNEL_PC_LINK", "邮件"),
+    ("EMAIL_CHANNEL_APP_LINK", "邮件"),
+    ("EMAIL_APP_LINK_SCHEME", "邮件"),
+    ("ROVORTEX_MAIL_MIN_INTERVAL_SECS", "邮件"),
+    ("ROVORTEX_MAIL_HOURLY_LIMIT", "邮件"),
+    ("ROVORTEX_MAIL_HOURLY_WINDOW_SECS", "邮件"),
+    // ── OAuth 登录 ──
+    ("OAUTH_GITHUB_CLIENT_ID", "OAuth 登录"),
+    ("OAUTH_GOOGLE_CLIENT_ID", "OAuth 登录"),
+    // ── 会话与账号 ──
+    ("ROVORTEX_REFRESH_TTL_DAYS", "会话与账号"),
+    ("ROVORTEX_EMAIL_VERIFICATION_TTL_MINS", "会话与账号"),
+    ("ROVORTEX_DELETION_GRACE_DAYS", "会话与账号"),
+    ("ROVORTEX_PASSWORD_MIN_LENGTH", "会话与账号"),
+    ("ROVORTEX_PASSWORD_MAX_LENGTH", "会话与账号"),
+    ("ROVORTEX_ADMIN_EMAILS", "会话与账号"),
+    // ── 安全与限流 ──
+    ("ROVORTEX_LOGIN_MAX_FAILURES", "安全与限流"),
+    ("ROVORTEX_LOGIN_LOCK_WINDOW_SECS", "安全与限流"),
+    ("ROVORTEX_CORS_ORIGINS", "安全与限流"),
+    // ── 运行参数 ──
+    ("ROVORTEX_LOG_BUFFER_CAPACITY", "运行参数"),
+];
+
 #[derive(Debug, Serialize)]
 pub struct ConfigEntry {
     pub key: String,
@@ -88,6 +124,8 @@ pub struct ConfigEntry {
     pub doc: String,
     /// 该键是否被 compose 透传给容器（没透传的改了也不生效）。
     pub wired: bool,
+    /// 分组名（KEY_GROUPS 未列出的键 = "其他"）。
+    pub group: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -161,6 +199,14 @@ fn render_env(map: &BTreeMap<String, String>) -> String {
     out
 }
 
+fn group_of(key: &str) -> String {
+    KEY_GROUPS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, g)| g.to_string())
+        .unwrap_or_else(|| "其他".to_string())
+}
+
 /// GET /api/admin/config —— 读取 .env（secret 脱敏）。
 pub async fn get_config(
     State(_state): State<AppState>,
@@ -200,6 +246,7 @@ pub async fn get_config(
             secret,
             doc,
             wired: WIRED_KEYS.contains(&k.as_str()),
+            group: group_of(k),
         });
     }
     // KEY_DOCS 里已透传但 .env 未配置的键：提示可添加。
@@ -214,6 +261,7 @@ pub async fn get_config(
                 secret: SECRET_KEYS.contains(k),
                 doc: d.to_string(),
                 wired: WIRED_KEYS.contains(k),
+                group: group_of(k),
             });
         }
     }

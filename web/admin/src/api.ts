@@ -186,7 +186,7 @@ export const adminApi = {
   config: () =>
     api
       .get<{
-        entries: { key: string; value: string; secret: boolean; doc: string; wired: boolean }[]
+        entries: { key: string; value: string; secret: boolean; doc: string; wired: boolean; group: string }[]
         available_keys: string[]
         modified_at: string | null
       }>('/api/admin/config')
