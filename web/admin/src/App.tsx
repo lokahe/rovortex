@@ -4,12 +4,14 @@ import {
   DatabaseOutlined,
   FileTextOutlined,
   LogoutOutlined,
+  ScheduleOutlined,
   SettingOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import DashboardPage from './pages/DashboardPage'
 import DbPage from './pages/DbPage'
+import JobsPage from './pages/JobsPage'
 import LoginPage from './pages/LoginPage'
 import LogsPage from './pages/LogsPage'
 import SettingsPage from './pages/SettingsPage'
@@ -30,6 +32,7 @@ function Shell({ children }: { children: React.ReactNode }) {
     loc.pathname.startsWith('/users') ? ['users']
     : loc.pathname.startsWith('/db') ? ['db']
     : loc.pathname.startsWith('/logs') ? ['logs']
+    : loc.pathname.startsWith('/jobs') ? ['jobs']
     : loc.pathname.startsWith('/settings') ? ['settings']
     : loc.pathname.startsWith('/login') ? []
     : ['dashboard']
@@ -55,6 +58,7 @@ function Shell({ children }: { children: React.ReactNode }) {
             { key: 'dashboard', icon: <DashboardOutlined />, label: '仪表盘' },
             { key: 'users', icon: <TeamOutlined />, label: '用户管理' },
             { key: 'logs', icon: <FileTextOutlined />, label: '日志' },
+            { key: 'jobs', icon: <ScheduleOutlined />, label: '定时任务' },
             { key: 'db', icon: <DatabaseOutlined />, label: '数据库' },
             { key: 'settings', icon: <SettingOutlined />, label: '服务配置' },
           ]}
@@ -131,6 +135,16 @@ export default function App() {
           <RequireAuth>
             <Shell>
               <LogsPage />
+            </Shell>
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/jobs"
+        element={
+          <RequireAuth>
+            <Shell>
+              <JobsPage />
             </Shell>
           </RequireAuth>
         }

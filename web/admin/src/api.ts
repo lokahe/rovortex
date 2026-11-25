@@ -201,4 +201,36 @@ export const adminApi = {
     api
       .post<{ restarted: boolean }>('/api/admin/config/restart', null, { timeout: 8000 })
       .then((r) => r.data),
+
+  jobs: () =>
+    api
+      .get<{
+        name: string
+        doc: string
+        interval_secs: number
+        enabled: boolean
+        last_run?: { at: string; elapsed_ms: number; ok?: string; err?: string }
+      }[]>('/api/admin/jobs')
+      .then((r) => r.data),
+
+  setJobEnabled: (name: string, enabled: boolean) =>
+    api.put<{ name: string; enabled: boolean }>(`/api/admin/jobs/${name}/enabled`, { enabled }).then((r) => r.data),
+
+  setJobInterval: (name: string, interval_secs: number) =>
+    api
+      .put<{ name: string; interval_secs: number }>(`/api/admin/jobs/${name}/interval`, { interval_secs })
+      .then((r) => r.data),
+
+  runJob: (name: string) =>
+    api
+      .post<{ at: string; elapsed_ms: number; ok?: string; err?: string }>(`/api/admin/jobs/${name}/run`)
+      .then((r) => r.data),
+
+  metricsHistory: (minutes: number) =>
+    api
+      .get<{ points: { ts: number; total: number; errors: number; avg_ms: number }[] }>(
+        '/api/admin/metrics/history',
+        { params: { minutes } },
+      )
+      .then((r) => r.data),
 }
