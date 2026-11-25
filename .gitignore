@@ -5,3 +5,7 @@ docker-compose.override.yml
 nul
 
 .idea/
+
+# admin 前端（web/admin）
+web/admin/node_modules
+web/admin/dist

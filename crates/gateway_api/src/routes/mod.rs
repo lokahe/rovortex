@@ -3,6 +3,7 @@
 pub mod account;
 pub mod admin;
 pub mod admin_logs;
+pub mod admin_web;
 pub mod auth;
 pub mod config;
 pub mod db;
@@ -80,6 +81,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::handler))
         .route("/metrics", get(metrics::handler))
+        // admin SPA（rust-embed；未构建 dist 时 503）
+        .route("/admin", get(admin_web::admin_root))
+        .route("/admin/", get(admin_web::admin_index))
+        .route("/admin/{*path}", get(admin_web::admin_spa))
         .route("/api/users/register", post(users::register))
         .route("/api/users/login", post(users::login))
         .route("/api/auth/signup/request", post(signup::request_signup))

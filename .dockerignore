@@ -10,3 +10,5 @@ test_parse.ps1
 .idea/
 docs/
 SKILL.md
+web/admin/node_modules
+web/admin/dist
