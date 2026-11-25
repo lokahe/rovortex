@@ -118,6 +118,20 @@ impl RefreshTokenRepository for PgRefreshTokenRepository {
         .map_err(map_err)?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn purge_expired_before(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, rovortex_users::UserError> {
+        let result = sqlx::query!(
+            "DELETE FROM refresh_tokens WHERE expires_at < $1",
+            cutoff
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(result.rows_affected())
+    }
 }
 
 // 避免未使用导入警告：expires_at 的比较由 SQL 完成。

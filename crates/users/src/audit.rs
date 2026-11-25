@@ -35,6 +35,9 @@ pub enum AuditAction {
     AdminDbUpdate,
     AdminDbDelete,
     AdminConfigUpdate,
+    AdminJobToggle,
+    AdminJobRun,
+    AccountsPurged,
 }
 
 impl AuditAction {
@@ -67,6 +70,9 @@ impl AuditAction {
             AuditAction::AdminDbUpdate => "admin_db_update",
             AuditAction::AdminDbDelete => "admin_db_delete",
             AuditAction::AdminConfigUpdate => "admin_config_update",
+            AuditAction::AdminJobToggle => "admin_job_toggle",
+            AuditAction::AdminJobRun => "admin_job_run",
+            AuditAction::AccountsPurged => "accounts_purged",
         }
     }
 }

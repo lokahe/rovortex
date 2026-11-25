@@ -88,4 +88,11 @@ pub trait UserRepository: Send + Sync {
         &self,
         since: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<(String, i64)>, UserError>;
+
+    /// 硬删冷静期（deleted_at 早于 cutoff）满的注销账号，返回删除数。
+    /// FK CASCADE 带走会话与外部身份；audit_logs ON DELETE SET NULL 留痕。
+    async fn purge_deleted_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, UserError>;
 }

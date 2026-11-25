@@ -365,4 +365,21 @@ impl UserRepository for PgUserRepository {
         .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
         Ok(rows.into_iter().map(|r| (r.action, r.count)).collect())
     }
+
+    async fn purge_deleted_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, UserError> {
+        // status=2（已注销）且 deleted_at 早于 cutoff。
+        // FK CASCADE 清 refresh_tokens / user_identities；
+        // audit_logs.user_id ON DELETE SET NULL，证据链保留。
+        let result = sqlx::query!(
+            "DELETE FROM users WHERE status = 2 AND deleted_at < $1",
+            cutoff
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_err(e, UserError::Hashing))?;
+        Ok(result.rows_affected())
+    }
 }

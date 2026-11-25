@@ -23,6 +23,7 @@ pub mod rate_limit;
 pub mod refresh_token;
 pub mod repository;
 pub mod service;
+pub mod settings;
 
 pub use admin::{AdminService, AdminStats, UserDetail, UserPage};
 pub use audit::{AuditAction, AuditEntry, AuditRepository, NewAuditLog};
@@ -40,3 +41,4 @@ pub use rate_limit::{LoginGuard, guard_key};
 pub use refresh_token::{NewRefreshToken, RefreshTokenRepository, SessionView};
 pub use repository::UserRepository;
 pub use service::{EmailChannels, ProfilePatch, SessionContext, UserService, UserServiceConfig};
+pub use settings::{AppSettings, SettingsError, SettingsStore};

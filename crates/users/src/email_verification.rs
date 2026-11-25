@@ -60,4 +60,10 @@ pub trait EmailVerificationRepository: Send + Sync {
         &self,
         token_hash: &str,
     ) -> Result<Option<(String, VerificationPurpose, Option<Uuid>)>, UserError>;
+
+    /// 硬删已消费/过期早于 cutoff 的验证记录（cron 清理），返回删除数。
+    async fn purge_stale_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, UserError>;
 }
