@@ -214,6 +214,11 @@ impl UserService {
         Arc::clone(&self.repo)
     }
 
+    /// 业务时序参数只读视图（如 cron 任务复用 deletion_grace_days，避免双数据源）。
+    pub fn config(&self) -> &UserServiceConfig {
+        &self.config
+    }
+
     /// 密码长度校验（阈值来自 config，注册与改密码共用）。
     fn validate_password_len(&self, password: &str) -> Result<(), UserError> {
         let len = password.chars().count();
@@ -230,6 +235,32 @@ impl UserService {
     /// 吊销用户全部会话（改密码等场景复用），返回吊销数量。
     pub async fn revoke_sessions_for(&self, user_id: Uuid) -> Result<u64, UserError> {
         self.refresh.revoke_all_for_user(user_id).await
+    }
+
+    // ---- cron 清理用例（jobs 框架调用；结果摘要在 jobs 层拼）----
+
+    /// 删除 expires_at 早于 cutoff 的 refresh token。
+    pub async fn purge_expired_refresh_tokens(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, UserError> {
+        self.refresh.purge_expired_before(cutoff).await
+    }
+
+    /// 删除已消费/过期早于 cutoff 的邮箱验证记录。
+    pub async fn purge_stale_email_verifications(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, UserError> {
+        self.email_verifications.purge_stale_before(cutoff).await
+    }
+
+    /// 硬删冷静期早于 cutoff 的注销账号（FK CASCADE 级联）。
+    pub async fn purge_deleted_accounts(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, UserError> {
+        self.repo.purge_deleted_before(cutoff).await
     }
 
     /// 签发会话：封禁检查 → 生成 refresh token，哈希落库。

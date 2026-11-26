@@ -5,6 +5,7 @@
 
 mod config;
 mod error;
+mod jobs;
 mod log_buffer;
 mod log_layer;
 mod mail_rate_limit;

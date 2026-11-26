@@ -20,7 +20,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run tests
-        run: cargo test --workspace
+        # rust-embed 需要编译期存在的 dist 目录（interpolate $ROVORTEX_ADMIN_DIST）；
+        # 测试不需要真实前端产物（真实产物在 Docker web-builder 阶段产出），空目录即可。
+        run: |
+          mkdir -p web/admin/dist
+          export ROVORTEX_ADMIN_DIST="$PWD/web/admin/dist"
+          cargo test --workspace
 
       - name: Set image tag
         id: tag

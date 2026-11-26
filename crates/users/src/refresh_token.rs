@@ -55,4 +55,10 @@ pub trait RefreshTokenRepository: Send + Sync {
 
     /// 吊销指定会话（校验归属）。返回是否确有此有效会话。
     async fn revoke_by_id(&self, user_id: Uuid, id: Uuid) -> Result<bool, UserError>;
+
+    /// 硬删 expires_at 早于 cutoff 的 token（cron 清理），返回删除数。
+    async fn purge_expired_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, UserError>;
 }

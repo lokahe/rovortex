@@ -10,7 +10,7 @@ use rovortex_users::{AdminService, DbBrowser, TokenSigner, UserService, UserServ
 use sqlx::PgPool;
 use storage_pg::{
     PgAuditRepository, PgDbBrowser, PgEmailVerificationRepository, PgOauthIdentityRepository,
-    PgRefreshTokenRepository, PgUserRepository,
+    PgRefreshTokenRepository, PgSettingsStore, PgUserRepository,
 };
 
 use crate::rate_limit::InMemoryLoginGuard;
@@ -101,6 +101,10 @@ pub struct AppState {
     pub audit: Arc<dyn rovortex_users::AuditRepository>,
     /// 发信频率限制（magic link / 找回密码 / 注销恢复共用一个实例）。
     pub mail_limiter: Arc<crate::mail_rate_limit::MailRateLimiter>,
+    /// 运行期键值设置（任务开关/参数；内存缓存 + PG 持久化）。
+    pub settings: Arc<rovortex_users::AppSettings>,
+    /// 定时任务句柄（管理端点读写状态；spawn_all 启动循环）。
+    pub jobs: Arc<Vec<Arc<crate::jobs::JobHandle>>>,
     /// 注册验证码确认尝试限流（6 位码爆破防线）。
     pub confirm_code_limiter: Arc<crate::routes::signup::ConfirmCodeLimiter>,
 }
@@ -152,6 +156,23 @@ impl AppState {
             }
         }
 
+        // 运行期设置：load_all 回填缓存（迁移 0012 建表）。
+        let settings = match rovortex_users::AppSettings::load(Arc::new(
+            PgSettingsStore::from_pool(pool.clone()),
+        ))
+        .await
+        {
+            Ok(s) => Arc::new(s),
+            Err(e) => panic!("failed to load app settings: {e}"),
+        };
+
+        // 定时任务：注册句柄 + 启动循环（开关/interval 从 settings 加载）。
+        let jobs = Arc::new(crate::jobs::spawn_all(crate::jobs::JobCtx {
+            users: users_service.clone(),
+            settings: settings.clone(),
+            audit: audit_repo.clone(),
+        }));
+
         Self {
             users: users_service,
             admin: admin_service,
@@ -175,6 +196,8 @@ impl AppState {
             mail_limiter: Arc::new(crate::mail_rate_limit::MailRateLimiter::with_config(
                 crate::config::mail_rate_limit_config(),
             )),
+            settings,
+            jobs,
             confirm_code_limiter: Arc::new(crate::routes::signup::ConfirmCodeLimiter::new()),
         }
     }

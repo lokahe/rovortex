@@ -3,13 +3,16 @@
 pub mod account;
 pub mod admin;
 pub mod admin_logs;
+pub mod admin_web;
 pub mod auth;
 pub mod config;
 pub mod db;
 pub mod email_entry;
 pub mod health;
+pub mod jobs;
 pub mod magic;
 pub mod metrics;
+pub mod metrics_admin;
 pub mod oauth;
 pub mod password_reset;
 pub mod session;
@@ -58,6 +61,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/stats", get(admin::stats))
         .route("/api/admin/logs", get(admin_logs::list_logs))
         .route("/api/admin/logs/stream", get(admin_logs::stream_logs))
+        .route("/api/admin/metrics/history", get(metrics_admin::history))
+        .route("/api/admin/metrics/live", get(metrics_admin::stream_live))
         .route("/api/admin/db/tables", get(db::list_tables))
         .route(
             "/api/admin/db/tables/{table}",
@@ -72,6 +77,17 @@ pub fn router(state: AppState) -> Router {
             get(config::get_config).put(config::update_config),
         )
         .route("/api/admin/config/restart", post(config::restart_container))
+        .route("/api/admin/jobs", get(jobs::list_jobs))
+        .route(
+            "/api/admin/jobs/{name}/enabled",
+            put(jobs::set_enabled),
+        )
+        .route(
+            "/api/admin/jobs/{name}/interval",
+            put(jobs::set_interval),
+        )
+        .route("/api/admin/jobs/{name}/param", put(jobs::set_param))
+        .route("/api/admin/jobs/{name}/run", post(jobs::run_now))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_admin,
@@ -80,6 +96,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::handler))
         .route("/metrics", get(metrics::handler))
+        // admin SPA（rust-embed；未构建 dist 时 503）
+        .route("/admin", get(admin_web::admin_root))
+        .route("/admin/", get(admin_web::admin_index))
+        .route("/admin/{*path}", get(admin_web::admin_spa))
         .route("/api/users/register", post(users::register))
         .route("/api/users/login", post(users::login))
         .route("/api/auth/signup/request", post(signup::request_signup))

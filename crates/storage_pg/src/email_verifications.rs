@@ -69,4 +69,20 @@ impl EmailVerificationRepository for PgEmailVerificationRepository {
             (r.email, purpose, r.user_id)
         }))
     }
+
+    async fn purge_stale_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, rovortex_users::UserError> {
+        // 已消费按消费时间算，未消费的按过期时间算；都早于 cutoff 才删。
+        let result = sqlx::query!(
+            r#"DELETE FROM email_verifications
+               WHERE COALESCE(consumed_at, expires_at) < $1"#,
+            cutoff,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(result.rows_affected())
+    }
 }
