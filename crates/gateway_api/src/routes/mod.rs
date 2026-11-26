@@ -86,6 +86,7 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/jobs/{name}/interval",
             put(jobs::set_interval),
         )
+        .route("/api/admin/jobs/{name}/param", put(jobs::set_param))
         .route("/api/admin/jobs/{name}/run", post(jobs::run_now))
         .layer(middleware::from_fn_with_state(
             state.clone(),

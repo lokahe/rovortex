@@ -15,6 +15,19 @@ use crate::routes::auth::AdminUser;
 use crate::state::AppState;
 use rovortex_users::audit::{AuditAction, NewAuditLog};
 
+/// 可调业务参数的展示视图。
+#[derive(Debug, serde::Serialize)]
+pub struct JobParamView {
+    pub name: &'static str,
+    pub doc: &'static str,
+    /// 当前生效值（app_settings 持久值，缺省 = 定义默认值）。
+    pub value: u64,
+    pub default: u64,
+    pub min: u64,
+    pub max: u64,
+    pub unit: &'static str,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct JobView {
     pub name: &'static str,
@@ -24,6 +37,8 @@ pub struct JobView {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_run: Option<LastRun>,
+    /// 可调业务参数（空切片 = 无）。
+    pub params: Vec<JobParamView>,
 }
 
 fn to_view_sync(h: &JobHandle) -> JobView {
@@ -33,6 +48,7 @@ fn to_view_sync(h: &JobHandle) -> JobView {
         interval_secs: 0,
         enabled: h.is_enabled(),
         last_run: None,
+        params: Vec::new(),
     }
 }
 
@@ -43,9 +59,24 @@ pub async fn list_jobs(
 ) -> Result<Json<Vec<JobView>>, ApiError> {
     let mut views = Vec::new();
     for h in state.jobs.iter() {
+        let mut params = Vec::new();
+        for p in h.params() {
+            let key = format!("job.{}.{}", h.name(), p.name);
+            let value = state.settings.get_u64(&key, p.default).await;
+            params.push(JobParamView {
+                name: p.name,
+                doc: p.doc,
+                value,
+                default: p.default,
+                min: p.min,
+                max: p.max,
+                unit: p.unit,
+            });
+        }
         views.push(JobView {
             interval_secs: h.interval_secs().await,
             last_run: h.last_run().await,
+            params,
             ..to_view_sync(h)
         });
     }
@@ -97,6 +128,50 @@ pub async fn set_enabled(
 pub struct IntervalRequest {
     /// 新间隔（秒）；下限 60。
     pub interval_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ParamRequest {
+    /// 参数名（如 "retention_days"）。
+    pub name: String,
+    pub value: u64,
+}
+
+/// PUT /api/admin/jobs/{name}/param —— 改业务参数（写 app_settings 持久化）。
+pub async fn set_param(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(name): Path<String>,
+    Json(req): Json<ParamRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let job = find_job(&state, &name)?;
+    let def = job
+        .params()
+        .iter()
+        .find(|p| p.name == req.name)
+        .ok_or_else(|| ApiError::not_found_with(format!("unknown param: {}", req.name)))?;
+    if req.value < def.min || req.value > def.max {
+        return Err(ApiError::bad_request(format!(
+            "{} 需在 {}-{} 之间",
+            req.name, def.min, def.max
+        )));
+    }
+    let key = format!("job.{name}.{}", req.name);
+    state
+        .settings
+        .set(&key, &req.value.to_string())
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let _ = state
+        .audit
+        .append(NewAuditLog {
+            user_id: Some(admin.user_id),
+            action: AuditAction::AdminJobToggle,
+            detail: format!("job={name} param={} value={}", req.name, req.value),
+            client_ip: String::new(),
+        })
+        .await;
+    Ok(Json(serde_json::json!({ "name": name, "param": req.name, "value": req.value })))
 }
 
 /// PUT /api/admin/jobs/{name}/interval —— 改频率（写 app_settings 持久化）。

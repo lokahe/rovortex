@@ -32,6 +32,19 @@ pub struct JobCtx {
 
 type JobFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
 
+/// 任务的可调业务参数（如保留天数）：管理页可读写，值存 app_settings。
+#[derive(Clone, Copy)]
+pub struct JobParam {
+    /// 参数名（如 "retention_days"），完整键 = `job.<name>.<param>`。
+    pub name: &'static str,
+    pub doc: &'static str,
+    pub default: u64,
+    pub min: u64,
+    pub max: u64,
+    /// 值的单位后缀（前端展示，如 "天"）。
+    pub unit: &'static str,
+}
+
 /// 任务定义（声明式，编译期注册）。
 pub struct JobDef {
     pub name: &'static str,
@@ -39,6 +52,8 @@ pub struct JobDef {
     /// 默认频率（秒）；运行期可被 `job.<name>.interval_secs` 覆盖。
     pub default_interval_secs: u64,
     pub default_enabled: bool,
+    /// 可调业务参数；无业务参数的任务留空切片。
+    pub params: &'static [JobParam],
     /// 默认开启时的业务参数（保留天数等），键约定 `job.<name>.*`。
     pub run: fn(JobCtx) -> JobFuture,
 }
@@ -69,6 +84,10 @@ impl JobHandle {
 
     pub fn doc(&self) -> &'static str {
         self.def.doc
+    }
+
+    pub fn params(&self) -> &'static [JobParam] {
+        self.def.params
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -126,9 +145,17 @@ fn defs() -> Vec<JobDef> {
     vec![
         JobDef {
             name: "refresh_token_cleanup",
-            doc: "删除过期 7 天以上的 refresh token（会话记录，含设备描述）",
+            doc: "删除过期一定天数后的 refresh token（会话记录，含设备描述）",
             default_interval_secs: 3600,
             default_enabled: true,
+            params: &[JobParam {
+                name: "retention_days",
+                doc: "过期后保留天数",
+                default: 7,
+                min: 1,
+                max: 365,
+                unit: "天",
+            }],
             run: |ctx| Box::pin(async move {
                 let days = ctx.settings.get_u64("job.refresh_token_cleanup.retention_days", 7).await;
                 let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
@@ -138,9 +165,17 @@ fn defs() -> Vec<JobDef> {
         },
         JobDef {
             name: "email_verification_cleanup",
-            doc: "删除已消费/过期 1 天以上的邮箱验证记录",
+            doc: "删除已消费/过期一定天数后的邮箱验证记录",
             default_interval_secs: 3600,
             default_enabled: true,
+            params: &[JobParam {
+                name: "retention_days",
+                doc: "已消费/过期后保留天数",
+                default: 1,
+                min: 1,
+                max: 365,
+                unit: "天",
+            }],
             run: |ctx| Box::pin(async move {
                 let days = ctx.settings.get_u64("job.email_verification_cleanup.retention_days", 1).await;
                 let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
@@ -150,11 +185,15 @@ fn defs() -> Vec<JobDef> {
         },
         JobDef {
             name: "account_purge",
-            doc: "硬删冷静期（默认 30 天）满的注销账号；会话与外部身份级联删除，审计留痕",
+            doc: "硬删冷静期满的注销账号；会话与外部身份级联删除，审计留痕",
             default_interval_secs: 3600,
             default_enabled: true,
+            // 冷静期天数不在任务里调：唯一数据源是 .env 的
+            // ROVORTEX_DELETION_GRACE_DAYS（注销请求时用同一值算恢复截止日），
+            // 在「服务配置 → 会话与账号」改 + 重启生效。
+            params: &[],
             run: |ctx| Box::pin(async move {
-                let days = ctx.settings.get_u64("job.account_purge.grace_days", 30).await;
+                let days = ctx.users.config().deletion_grace_days as u64;
                 let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
                 let n = ctx.users.purge_deleted_accounts(cutoff).await.map_err(|e| e.to_string())?;
                 if n > 0 {

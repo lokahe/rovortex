@@ -214,6 +214,11 @@ impl UserService {
         Arc::clone(&self.repo)
     }
 
+    /// 业务时序参数只读视图（如 cron 任务复用 deletion_grace_days，避免双数据源）。
+    pub fn config(&self) -> &UserServiceConfig {
+        &self.config
+    }
+
     /// 密码长度校验（阈值来自 config，注册与改密码共用）。
     fn validate_password_len(&self, password: &str) -> Result<(), UserError> {
         let len = password.chars().count();

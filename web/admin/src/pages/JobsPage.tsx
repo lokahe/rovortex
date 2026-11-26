@@ -4,12 +4,23 @@ import { useEffect, useState } from 'react'
 import { adminApi, apiError } from '../api'
 import { App as AntApp } from 'antd'
 
+interface JobParam {
+  name: string
+  doc: string
+  value: number
+  default: number
+  min: number
+  max: number
+  unit: string
+}
+
 interface Job {
   name: string
   doc: string
   interval_secs: number
   enabled: boolean
   last_run?: { at: string; elapsed_ms: number; ok?: string; err?: string }
+  params: JobParam[]
 }
 
 function fmtAgo(at: string): string {
@@ -24,6 +35,7 @@ export default function JobsPage() {
   const { message } = AntApp.useApp()
   const [jobs, setJobs] = useState<Job[]>([])
   const [intervalDraft, setIntervalDraft] = useState<Record<string, string>>({})
+  const [paramDraft, setParamDraft] = useState<Record<string, string>>({})
 
   const reload = () =>
     adminApi
@@ -74,12 +86,32 @@ export default function JobsPage() {
     }
   }
 
+  const applyParam = async (job: Job, p: JobParam) => {
+    const draftKey = `${job.name}.${p.name}`
+    const raw = (paramDraft[draftKey] ?? '').trim()
+    if (!raw) return
+    const v = Number(raw)
+    if (!Number.isInteger(v) || v < p.min || v > p.max) {
+      message.error(`${p.name} 需为 ${p.min}-${p.max} 的整数`)
+      return
+    }
+    try {
+      await adminApi.setJobParam(job.name, p.name, v)
+      message.success(`${job.name}.${p.name} 已改为 ${v}${p.unit}，下次执行生效`)
+      setParamDraft((d) => ({ ...d, [draftKey]: '' }))
+      reload()
+    } catch (err) {
+      message.error(apiError(err))
+    }
+  }
+
   return (
     <>
       <Typography.Title level={4}>定时任务</Typography.Title>
       <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
-        任务逻辑编译期内置于服务端（管理页是遥控器，不是 IDE）；开关与间隔持久化在
-        app_settings，重启后保持。数据来自 <code>/api/admin/jobs</code>。
+        任务逻辑编译期内置于服务端（管理页是遥控器，不是 IDE）；开关、间隔与业务参数持久化在
+        app_settings，改完下次执行生效，无需重启。account_purge 的冷静期在
+        「服务配置 → 会话与账号」（ROVORTEX_DELETION_GRACE_DAYS，需重启）。
       </Typography.Paragraph>
       {jobs.map((job) => (
         <Card key={job.name} size="small" style={{ marginBottom: 12 }}>
@@ -108,6 +140,28 @@ export default function JobsPage() {
                 </Button>
               </div>
             </div>
+            {job.params.map((p) => (
+              <div key={p.name}>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {p.doc}（{p.name}，{p.min}-{p.max} {p.unit}）
+                </Typography.Text>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <Input
+                    size="small"
+                    style={{ width: 90, fontFamily: 'monospace' }}
+                    placeholder={String(p.value)}
+                    value={paramDraft[`${job.name}.${p.name}`] ?? ''}
+                    onChange={(e) =>
+                      setParamDraft((d) => ({ ...d, [`${job.name}.${p.name}`]: e.target.value }))
+                    }
+                    onPressEnter={() => applyParam(job, p)}
+                  />
+                  <Button size="small" onClick={() => applyParam(job, p)}>
+                    改
+                  </Button>
+                </div>
+              </div>
+            ))}
             <div style={{ minWidth: 220, flex: '1 1 auto' }}>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 上次执行

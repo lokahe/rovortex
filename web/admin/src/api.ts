@@ -210,6 +210,7 @@ export const adminApi = {
         interval_secs: number
         enabled: boolean
         last_run?: { at: string; elapsed_ms: number; ok?: string; err?: string }
+        params: { name: string; doc: string; value: number; default: number; min: number; max: number; unit: string }[]
       }[]>('/api/admin/jobs')
       .then((r) => r.data),
 
@@ -219,6 +220,11 @@ export const adminApi = {
   setJobInterval: (name: string, interval_secs: number) =>
     api
       .put<{ name: string; interval_secs: number }>(`/api/admin/jobs/${name}/interval`, { interval_secs })
+      .then((r) => r.data),
+
+  setJobParam: (name: string, param: string, value: number) =>
+    api
+      .put<{ name: string; param: string; value: number }>(`/api/admin/jobs/${name}/param`, { name: param, value })
       .then((r) => r.data),
 
   runJob: (name: string) =>
