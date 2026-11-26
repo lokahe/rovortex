@@ -259,6 +259,29 @@ impl UserRepository for TestRepository {
     ) -> Result<Vec<(String, i64)>, UserError> {
         Ok(Vec::new())
     }
+
+    async fn purge_deleted_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, UserError> {
+        let mut store = self.store.lock().unwrap();
+        let mut username_index = self.username_index.lock().unwrap();
+        let mut email_index = self.email_index.lock().unwrap();
+        let doomed: Vec<Uuid> = store
+            .values()
+            .filter(|u| {
+                u.status == 2
+                    && u.deleted_at.is_some_and(|d| d < cutoff)
+            })
+            .map(|u| u.id)
+            .collect();
+        for id in &doomed {
+            store.remove(id);
+            username_index.retain(|_, v| v != id);
+            email_index.retain(|_, v| v != id);
+        }
+        Ok(doomed.len() as u64)
+    }
 }
 
 /// 内存邮件桩：记录发送内容供断言。
@@ -329,6 +352,21 @@ impl EmailVerificationRepository for TestVerificationRepository {
             }
             None => Ok(None),
         }
+    }
+
+    async fn purge_stale_before(
+        &self,
+        cutoff: chrono::DateTime<Utc>,
+    ) -> Result<u64, UserError> {
+        let mut tokens = self.tokens.lock().unwrap();
+        let before = tokens.len();
+        // 内存桩没有 consumed_at 时间戳：消费行按立即过期处理（end=cutoff 即可清除），
+        // 未消费行与 PG 语义一致按 expires_at 判定。
+        tokens.retain(|(t, consumed)| {
+            let end = if *consumed { cutoff } else { t.expires_at };
+            end >= cutoff
+        });
+        Ok((before - tokens.len()) as u64)
     }
 }
 
@@ -427,6 +465,17 @@ impl RefreshTokenRepository for TestRefreshRepository {
         } else {
             Ok(false)
         }
+    }
+
+    async fn purge_expired_before(
+        &self,
+        cutoff: chrono::DateTime<Utc>,
+    ) -> Result<u64, UserError> {
+        let mut tokens = self.tokens.lock().unwrap();
+        // 与 PG 实现一致：只删过期的 token 行，不动 sessions 表。
+        let before = tokens.len();
+        tokens.retain(|_, (_, exp)| *exp >= cutoff);
+        Ok((before - tokens.len()) as u64)
     }
 }
 
