@@ -2,7 +2,7 @@ import { Button, Card, Checkbox, Dropdown, Form, Input, Modal, Popconfirm, Space
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table'
 import type { FilterValue, SorterResult } from 'antd/es/table/interface'
 import { useCallback, useEffect, useState } from 'react'
-import { CaretDownOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SettingOutlined } from '@ant-design/icons'
+import { CaretDownOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SettingOutlined, TableOutlined } from '@ant-design/icons'
 import { Resizable } from 'react-resizable'
 import 'react-resizable/css/styles.css'
 import { adminApi, apiError } from '../api'
@@ -103,6 +103,8 @@ export default function DbPage() {
   const [loading, setLoading] = useState(false)
   /** 用户手动打开的列（叠加在 HIDDEN_BY_DEFAULT 之上）；切表时重置。 */
   const [revealed, setRevealed] = useState<Set<string>>(new Set())
+  /** 表结构卡片展开状态（默认收起）；切表保持——结构信息各表都有用。 */
+  const [schemaOpen, setSchemaOpen] = useState(false)
   /** 手动拖出的列宽（列名 → px）；切表时重置。 */
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   /** 行编辑弹窗：editing.row 为 null 表示新增。 */
@@ -342,6 +344,50 @@ export default function DbPage() {
           label: `${t.name} (${t.rows})`,
         }))}
       />
+      <Card
+        size="small"
+        style={{ marginBottom: 16 }}
+        styles={{ body: { padding: schemaOpen ? '12px 24px' : '6px 24px' } }}
+        title={
+          <span
+            onClick={() => setSchemaOpen((v) => !v)}
+            style={{ cursor: 'pointer', userSelect: 'none', fontSize: 13, fontWeight: 400 }}
+          >
+            <TableOutlined style={{ marginRight: 6 }} />
+            {active} 表结构（{data?.columns.length ?? 0} 列）
+            <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+              {schemaOpen ? '点击收起' : '点击展开'}
+            </Typography.Text>
+          </span>
+        }
+      >
+        {schemaOpen && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 24px' }}>
+            {(data?.columns ?? []).map((c) => (
+              <Space key={c.name} size={6} style={{ minWidth: 220 }}>
+                <Typography.Text code style={{ fontSize: 12 }}>
+                  {c.name}
+                </Typography.Text>
+                <Tag color={TYPE_COLORS[c.data_type]} style={{ fontSize: 10, lineHeight: '16px' }}>
+                  {c.data_type}
+                </Tag>
+                {NOT_NULL_COLUMNS[active ?? '']?.has(c.name) ? (
+                  <Tag style={{ fontSize: 10, lineHeight: '16px' }}>NOT NULL</Tag>
+                ) : (
+                  <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                    可空
+                  </Typography.Text>
+                )}
+                {HIDDEN_BY_DEFAULT.has(c.name) && (
+                  <Tag color="warning" style={{ fontSize: 10, lineHeight: '16px' }}>
+                    默认隐藏
+                  </Tag>
+                )}
+              </Space>
+            ))}
+          </div>
+        )}
+      </Card>
       <Card>
         <Space style={{ marginBottom: 16 }} wrap>
           <Input.Search
